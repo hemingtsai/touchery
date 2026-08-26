@@ -1,7 +1,10 @@
+// objc 0.2's class!/msg_send! macros internally check cfg(feature = "cargo-clippy"),
+// which cargo cannot know about; silence the resulting false-positive lints.
+#![allow(unexpected_cfgs)]
 use std::collections::HashMap;
 use std::process::Command;
 
-use pinyin::{ToPinyin, ToPinyinMulti};
+use pinyin::ToPinyinMulti;
 
 /// One searchable segment of an app's location: either a localized ancestor
 /// folder ("实用工具") or the app itself (last element).
@@ -100,6 +103,8 @@ pub struct AppEntry {
 }
 
 impl AppEntry {
+    /// Convenience constructor; only used by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(name: String, path: String) -> Self {
         Self::with_display_name(name, path, None)
     }

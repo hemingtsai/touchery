@@ -166,7 +166,7 @@ fn parse_hex(s: &str) -> anyhow::Result<Hsla> {
             let b = expand(value & 0xf);
             (((r << 24) | (g << 16) | (b << 8)) as u32) | 0xff
         }
-        6 => (((value as u32) << 8) | 0xff),
+        6 => ((value as u32) << 8) | 0xff,
         8 => value as u32,
         _ => anyhow::bail!("unsupported hex color length: #{s} (use #rgb/#rrggbb/#rrggbbaa)"),
     };

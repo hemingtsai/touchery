@@ -1,5 +1,5 @@
 use crate::config::{Config, HotkeyConfig};
-use crate::{themes, ui_theme::*};
+use crate::themes;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -249,7 +249,7 @@ impl SettingsView {
         } else if plugin.enabled && plugin.loaded {
             pal.accent_ok
         } else {
-            TEXT_SECONDARY
+            pal.text_secondary
         };
 
         div()

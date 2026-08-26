@@ -1,3 +1,6 @@
+// objc 0.2's class!/msg_send! macros internally check cfg(feature = "cargo-clippy"),
+// which cargo cannot know about; silence the resulting false-positive lints.
+#![allow(unexpected_cfgs)]
 mod apps;
 mod config;
 mod hotkey;
