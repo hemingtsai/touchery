@@ -2,6 +2,7 @@ mod apps;
 mod config;
 mod hotkey;
 mod launcher;
+mod plugins;
 mod search;
 mod tray;
 mod ui_settings;
@@ -21,6 +22,7 @@ struct LauncherWindowState {
     hotkey_manager: RefCell<Option<global_hotkey::GlobalHotKeyManager>>,
     hotkey_id: Arc<RwLock<u32>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
+    plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
 }
 
 impl Global for LauncherWindowState {}
@@ -44,6 +46,9 @@ fn main() {
         let hotkey_id = Arc::new(RwLock::new(hotkey_state.id));
 
         let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
+        let plugin_manager = Arc::new(std::sync::Mutex::new(plugins::PluginManager {
+            plugins: Vec::new(),
+        }));
 
         // Menu bar tray icon (lightning bolt). Must stay alive for the whole
         // process lifetime.
@@ -62,7 +67,11 @@ fn main() {
             hotkey_manager: RefCell::new(Some(hotkey_state.manager)),
             hotkey_id: hotkey_id.clone(),
             apps_index: apps_index.clone(),
+            plugin_manager: plugin_manager.clone(),
         });
+
+        // Bind Escape globally so the launcher window can dismiss itself.
+        cx.bind_keys([KeyBinding::new("escape", launcher::LauncherCancel, None)]);
 
         // Index applications in the background once at startup.
         let index_ref = apps_index.clone();
@@ -70,6 +79,14 @@ fn main() {
             .spawn(async move {
                 let entries = apps::enumerate_apps();
                 *index_ref.write().unwrap() = entries;
+            })
+            .detach();
+
+        // Load plugins in the background once at startup.
+        let pm_ref = plugin_manager.clone();
+        cx.background_executor()
+            .spawn(async move {
+                pm_ref.lock().unwrap().load_all();
             })
             .detach();
 
@@ -207,6 +224,12 @@ pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
         .apps_index
         .read()
         .unwrap()
+        .clone()
+}
+
+pub fn plugin_manager(cx: &App) -> Arc<std::sync::Mutex<plugins::PluginManager>> {
+    cx.global::<LauncherWindowState>()
+        .plugin_manager
         .clone()
 }
 
