@@ -6582,11 +6582,14 @@ name = "touchery"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 6.0.0",
  "global-hotkey",
  "gpui",
  "gpui-component",
  "objc",
  "pinyin",
+ "serde",
+ "serde_json",
  "tray-icon",
 ]
 

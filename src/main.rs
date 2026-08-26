@@ -1,4 +1,5 @@
 mod apps;
+mod config;
 mod hotkey;
 mod launcher;
 mod search;
@@ -16,6 +17,9 @@ struct LauncherWindowState {
     launcher_window: RefCell<Option<AnyWindowHandle>>,
     settings_window: RefCell<Option<AnyWindowHandle>>,
     _tray: RefCell<Option<tray_icon::TrayIcon>>,
+    /// Dropping the old manager unregisters its hotkeys.
+    hotkey_manager: RefCell<Option<global_hotkey::GlobalHotKeyManager>>,
+    hotkey_id: Arc<RwLock<u32>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
 }
 
@@ -27,7 +31,10 @@ fn main() {
 
         set_accessory_policy();
 
-        let hotkey_state = match hotkey::HotkeyState::register(hotkey::default_hotkey()) {
+        let config = config::Config::load();
+        let initial_hotkey = hotkey::hotkey_from_config(&config.hotkey)
+            .unwrap_or_else(|_| hotkey::default_hotkey());
+        let hotkey_state = match hotkey::HotkeyState::register(initial_hotkey) {
             Ok(state) => state,
             Err(e) => {
                 eprintln!("Failed to register global hotkey: {e}");
@@ -35,10 +42,6 @@ fn main() {
             }
         };
         let hotkey_id = Arc::new(RwLock::new(hotkey_state.id));
-
-        // Keep the manager alive for the whole process lifetime; dropping it
-        // unregisters the hotkey.
-        let manager = RefCell::new(Some(hotkey_state.manager));
 
         let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
 
@@ -56,6 +59,8 @@ fn main() {
             launcher_window: RefCell::new(None),
             settings_window: RefCell::new(None),
             _tray: RefCell::new(tray),
+            hotkey_manager: RefCell::new(Some(hotkey_state.manager)),
+            hotkey_id: hotkey_id.clone(),
             apps_index: apps_index.clone(),
         });
 
@@ -67,13 +72,6 @@ fn main() {
                 *index_ref.write().unwrap() = entries;
             })
             .detach();
-
-        // Keep manager alive until quit.
-        cx.on_app_quit(move |_| {
-            drop(manager.take());
-            async {}
-        })
-        .detach();
 
         let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
         cx.spawn(async move |cx| loop {
@@ -210,6 +208,16 @@ pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
         .read()
         .unwrap()
         .clone()
+}
+
+/// Re-register the global hotkey: drops the old manager (unregistering the old
+/// key) and installs a new one.
+pub fn apply_hotkey(cx: &mut App, hk: global_hotkey::hotkey::HotKey) -> anyhow::Result<()> {
+    let state = hotkey::HotkeyState::register(hk)?;
+    let global = cx.global::<LauncherWindowState>();
+    *global.hotkey_id.write().unwrap() = state.id;
+    *global.hotkey_manager.borrow_mut() = Some(state.manager);
+    Ok(())
 }
 
 fn set_accessory_policy() {
