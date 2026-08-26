@@ -43,6 +43,9 @@ pub struct LauncherDelegate {
     plugin_rows: Vec<Row>,
     last_query: String,
     search_generation: usize,
+    /// When true, `>` plugin routing is disabled and every query searches
+    /// local applications only.
+    apps_only: bool,
 }
 
 impl LauncherDelegate {
@@ -61,7 +64,7 @@ impl LauncherDelegate {
     /// Synchronously apply a query. Returns (generation, is_prefix_mode).
     fn apply_query(&mut self, query: &str) -> (usize, bool) {
         self.last_query = query.to_string();
-        if query.starts_with(PLUGIN_PREFIX) {
+        if !self.apps_only && query.starts_with(PLUGIN_PREFIX) {
             self.app_rows.clear();
             self.plugin_rows.clear();
             self.search_generation += 1;
@@ -146,12 +149,21 @@ impl LauncherView {
             plugin_rows: Vec::new(),
             last_query: String::new(),
             search_generation: 0,
+            // Read once per window; the window is recreated on every hotkey
+            // press so control-panel toggles take effect on next summon.
+            apps_only: crate::config::Config::load().apps_only,
         };
 
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
 
-        let query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 > 调用插件…"));
+        let query_input = cx.new(|cx| {
+            let apps_only = crate::config::Config::load().apps_only;
+            InputState::new(window, cx).placeholder(if apps_only {
+                "搜索应用程序…"
+            } else {
+                "搜索应用，或输入 > 调用插件…"
+            })
+        });
 
         let sub_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回"));

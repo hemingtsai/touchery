@@ -407,6 +407,50 @@ impl Render for SettingsView {
         }
         root = root.child(theme_section);
 
+        // ---- apps-only toggle section ----
+        let apps_only = crate::config::Config::load().apps_only;
+        let entity = cx.entity();
+        root = root.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py_2()
+                .px_3()
+                .rounded_md()
+                .bg(pal.row_bg)
+                .child(
+                    div().flex().flex_col().gap_y_0p5()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(pal.text_primary)
+                                .child("仅搜索应用程序"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(pal.text_secondary)
+                                .child("开启后禁用 > 插件路由，下次唤起启动器生效"),
+                        ),
+                )
+                .child(
+                    Switch::new("apps-only-toggle")
+                        .checked(apps_only)
+                        .on_click(move |checked: &bool, _window, cx| {
+                            let mut config = crate::config::Config::load();
+                            config.apps_only = *checked;
+                            let result = config.save();
+                            entity.update(cx, |_, cx| {
+                                if let Err(e) = result {
+                                    eprintln!("[settings] failed to save apps_only: {e}");
+                                }
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+
         // ---- plugins section ----
         let mut section = div().flex().flex_col().gap_2().child(
             div()

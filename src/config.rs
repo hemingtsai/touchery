@@ -37,6 +37,9 @@ pub struct Config {
     pub plugins: HashMap<String, bool>,
     /// Active theme file stem; "builtin" (or unknown) uses the built-in palette.
     pub theme: String,
+    /// When true, disable the `>` plugin routing entirely: every query is
+    /// searched against local applications only.
+    pub apps_only: bool,
 }
 
 impl Config {
