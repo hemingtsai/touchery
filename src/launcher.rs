@@ -103,7 +103,6 @@ impl ListDelegate for LauncherDelegate {
                 .px_4()
                 .py_2()
                 .rounded_md()
-                .hover(|s| s.bg(pal.hover_bg))
                 .child(div().text_size(px(14.0)).text_color(pal.text_primary).child(text)),
         ))
     }

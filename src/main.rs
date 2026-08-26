@@ -67,6 +67,23 @@ fn main() {
         // The control panel paints its own opaque background and is unaffected.
         gpui_component::Theme::global_mut(cx).background = gpui::hsla(0.0, 0.0, 0.0, 0.0);
 
+        // Override gpui-component's light-mode list hover color.
+        // The default #f5f5f5 is nearly identical to our card_bg (#f5f5f8),
+        // making hover invisible. Patch the stored light-theme config so the
+        // override persists across light/dark switches.
+        {
+            use gpui_component::Theme;
+            let theme = Theme::global_mut(cx);
+            let mut light = (*theme.light_theme).clone();
+            light.colors.list_hover = Some("#e2e2e6FF".into());
+            theme.light_theme = std::rc::Rc::new(light);
+            // Immediately re-apply so the current frame picks it up.
+            if !theme.is_dark() {
+                let cfg = theme.light_theme.clone();
+                theme.apply_config(&cfg);
+            }
+        }
+
         // Load user Lua themes (~/Library/Application Support/touchery/themes).
         themes::init(cx);
 
