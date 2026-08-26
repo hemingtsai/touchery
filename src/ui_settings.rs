@@ -14,6 +14,7 @@ pub struct SettingsView {
     hotkey: HotkeyConfig,
     recording: bool,
     saved_at: Option<String>,
+    _keystroke_subscription: Subscription,
 }
 
 /// Snapshot row of a plugin for rendering.
@@ -26,29 +27,44 @@ struct PluginRowView {
 }
 
 impl SettingsView {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = Config::load();
+
+        // Observe every keystroke in this window regardless of focus or
+        // component key bindings — required for reliable hotkey recording.
+        // (Raw on_key_down listeners only fire after action bindings had a
+        // chance to consume the key.)
+        let keystroke_subscription = cx.observe_keystrokes(Self::on_any_keystroke);
+
         Self {
             hotkey: config.hotkey,
             recording: false,
             saved_at: None,
+            _keystroke_subscription: keystroke_subscription,
         }
     }
 
     fn start_recording(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        self.recording = true;
+        // Toggle: click again (button reads "取消") to stop recording.
+        self.recording = !self.recording;
+        self.saved_at = None;
         cx.notify();
     }
 
-    fn on_key_down(
+    /// Global keystroke observer: captures the hotkey while recording.
+    fn on_any_keystroke(
         &mut self,
-        event: &KeyDownEvent,
+        event: &KeystrokeEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.recording {
             return;
         }
+
+        // Swallow every key while recording so nothing else reacts.
+        cx.stop_propagation();
+
         let keystroke = &event.keystroke;
         let key = keystroke.key.to_lowercase();
 
@@ -64,6 +80,7 @@ impl SettingsView {
             && !keystroke.modifiers.platform
         {
             self.recording = false;
+            self.saved_at = Some("已取消录制".to_string());
             cx.notify();
             return;
         }
@@ -202,7 +219,6 @@ impl Render for SettingsView {
 
         let mut root = div()
             .id("settings-root")
-            .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
             .bg(gpui::rgba(0x1e1e22_fc))
             .p_6()
@@ -245,15 +261,23 @@ impl Render for SettingsView {
                                 .rounded_md()
                                 .bg(gpui::rgba(0xffffff14))
                                 .border_1()
-                                .border_color(gpui::rgba(0xffffff26))
+                                .border_color(if self.recording {
+                                    gpui::rgba(0x8ab4f8_ff)
+                                } else {
+                                    gpui::rgba(0xffffff26)
+                                })
                                 .text_size(px(13.0))
                                 .text_color(gpui::white())
-                                .child(hotkey_display),
+                                .child(if self.recording {
+                                    "录制中…".to_string()
+                                } else {
+                                    hotkey_display
+                                }),
                         )
                         .child(
                             Button::new("record")
                                 .label(if self.recording {
-                                    "按下新快捷键… (Esc 取消)"
+                                    "取消"
                                 } else {
                                     "修改快捷键"
                                 })
@@ -270,20 +294,16 @@ impl Render for SettingsView {
         );
 
         // ---- plugins section ----
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(gpui::rgba(0xffffff_cc))
-                    .child(format!(
-                        "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
-                        plugins.len()
-                    )),
-            );
+        let mut section = div().flex().flex_col().gap_2().child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(gpui::rgba(0xffffff_cc))
+                .child(format!(
+                    "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
+                    plugins.len()
+                )),
+        );
 
         if plugins.is_empty() {
             section = section.child(
