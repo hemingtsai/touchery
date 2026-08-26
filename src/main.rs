@@ -6,78 +6,150 @@ mod search;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::Root;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::RwLock;
+
+struct LauncherWindowState {
+    launcher_window: RefCell<Option<AnyWindowHandle>>,
+    apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
+}
+
+impl Global for LauncherWindowState {}
 
 fn main() {
     Application::new().run(|cx| {
         gpui_component::init(cx);
 
-        let hotkey_state = match hotkey::HotkeyState::register() {
-            Ok(state) => Some(state),
+        set_accessory_policy();
+
+        let hotkey_state = match hotkey::HotkeyState::register(hotkey::default_hotkey()) {
+            Ok(state) => state,
             Err(e) => {
                 eprintln!("Failed to register global hotkey: {e}");
-                None
+                std::process::exit(1);
             }
         };
+        let hotkey_id = Arc::new(RwLock::new(hotkey_state.id));
 
-        let window_bounds = compute_spotlight_bounds(cx);
+        // Keep the manager alive for the whole process lifetime; dropping it
+        // unregisters the hotkey.
+        let manager = RefCell::new(Some(hotkey_state.manager));
 
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                    titlebar: None,
-                    focus: false,
-                    show: false,
-                    kind: WindowKind::PopUp,
-                    is_movable: false,
-                    is_resizable: false,
-                    is_minimizable: false,
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let launcher = cx.new(|cx| launcher::LauncherView::new(window, cx));
-                    cx.new(|cx| Root::new(launcher, window, cx))
-                },
-            )
-            .expect("Failed to open launcher window");
+        let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
 
-        if let Some(hotkey_state) = hotkey_state {
-            let hotkey_id = hotkey_state.id;
-            let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
-            let mut visible = false;
+        cx.set_global(LauncherWindowState {
+            launcher_window: RefCell::new(None),
+            apps_index: apps_index.clone(),
+        });
 
-            cx.spawn(async move |cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(50))
-                        .await;
-
-                    while let Ok(event) = receiver.try_recv() {
-                        if event.id == hotkey_id
-                            && event.state == global_hotkey::HotKeyState::Pressed
-                        {
-                            let _ = cx.update(|cx| {
-                                if visible {
-                                    cx.hide();
-                                    visible = false;
-                                } else {
-                                    cx.activate(true);
-                                    window
-                                        .update(cx, |_, window, _| {
-                                            window.activate_window();
-                                        })
-                                        .ok();
-                                    visible = true;
-                                }
-                            });
-                        }
-                    }
-                }
+        // Index applications in the background once at startup.
+        let index_ref = apps_index.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let entries = apps::enumerate_apps();
+                *index_ref.write().unwrap() = entries;
             })
             .detach();
-        }
+
+        // Keep manager alive until quit.
+        cx.on_app_quit(move |_| {
+            drop(manager.take());
+            async {}
+        })
+        .detach();
+
+        let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+        cx.spawn(async move |cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+
+            while let Ok(event) = receiver.try_recv() {
+                if event.state != global_hotkey::HotKeyState::Pressed {
+                    continue;
+                }
+                let current_id = *hotkey_id.read().unwrap();
+                if event.id != current_id {
+                    continue;
+                }
+                let _ = cx.update(|cx| toggle_launcher(cx));
+            }
+        })
+        .detach();
     });
+}
+
+fn toggle_launcher(cx: &mut App) {
+    let existing = cx
+        .global::<LauncherWindowState>()
+        .launcher_window
+        .borrow_mut()
+        .take();
+    if let Some(handle) = existing {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return;
+    }
+
+    let bounds = compute_spotlight_bounds(cx);
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                focus: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                window_background: WindowBackgroundAppearance::Transparent,
+                ..Default::default()
+            },
+            |window, cx| {
+                let launcher = cx.new(|cx| launcher::LauncherView::new(window, cx));
+                launcher.update(cx, |v, cx| v.focus_query(window, cx));
+                cx.new(|cx| Root::new(launcher, window, cx))
+            },
+        )
+        .expect("Failed to open launcher window");
+
+    cx.global::<LauncherWindowState>()
+        .launcher_window
+        .borrow_mut()
+        .replace(handle.into());
+}
+
+pub fn close_launcher(cx: &mut App) {
+    let existing = cx
+        .global::<LauncherWindowState>()
+        .launcher_window
+        .borrow_mut()
+        .take();
+    if let Some(handle) = existing {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+/// Snapshot of the application index (loaded once at startup).
+pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
+    cx.global::<LauncherWindowState>()
+        .apps_index
+        .read()
+        .unwrap()
+        .clone()
+}
+
+fn set_accessory_policy() {
+    use objc::class;
+    use objc::msg_send;
+    use objc::runtime::Object;
+    use objc::sel;
+    use objc::sel_impl;
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        // NSApplicationActivationPolicyAccessory = 1
+        let _: () = msg_send![app, setActivationPolicy: 1i64];
+    }
 }
 
 fn compute_spotlight_bounds(cx: &App) -> Bounds<Pixels> {

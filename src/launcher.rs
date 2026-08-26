@@ -1,12 +1,10 @@
-use crate::apps::{AppEntry, enumerate_apps};
+use crate::apps::AppEntry;
 use crate::search::search_apps;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::IndexPath;
 use std::sync::Arc;
-
-actions!(launcher, [Cancel, Confirm]);
 
 pub struct LauncherView {
     list: Entity<ListState<LauncherDelegate>>,
@@ -33,17 +31,20 @@ impl ListDelegate for LauncherDelegate {
     ) -> Option<Self::Item> {
         let app_idx = *self.filtered_indices.get(ix.row)?;
         let app = &self.all_apps[app_idx];
-        Some(
-            ListItem::new(ix).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .py_2()
-                    .rounded_md()
-                    .child(div().text_size(px(14.0)).text_color(gpui::white()).child(app.name.clone())),
-            ),
-        )
+        Some(ListItem::new(ix).child(
+            div()
+                .flex()
+                .items_center()
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .text_color(gpui::white())
+                        .child(app.name.clone()),
+                ),
+        ))
     }
 
     fn set_selected_index(
@@ -80,7 +81,7 @@ impl ListDelegate for LauncherDelegate {
 
 impl LauncherView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let all_apps = Arc::new(enumerate_apps());
+        let all_apps = Arc::new(crate::app_index(cx));
         let initial_indices: Vec<usize> = (0..all_apps.len()).collect();
 
         let delegate = LauncherDelegate {
@@ -103,15 +104,13 @@ impl LauncherView {
                         if let Some(&app_idx) = delegate.filtered_indices.get(ix.row) {
                             let path = all_apps[app_idx].path.clone();
                             std::thread::spawn(move || {
-                                let _ = std::process::Command::new("open")
-                                    .args(["-g", &path])
-                                    .spawn();
+                                let _ = std::process::Command::new("open").arg(&path).spawn();
                             });
                         }
-                        cx.hide();
+                        crate::close_launcher(cx);
                     }
                     gpui_component::list::ListEvent::Cancel => {
-                        cx.hide();
+                        crate::close_launcher(cx);
                     }
                     _ => {}
                 }
@@ -123,17 +122,17 @@ impl LauncherView {
             _subscription: subscription,
         }
     }
+
+    pub fn focus_query(&self, window: &mut Window, cx: &mut App) {
+        self.list.update(cx, |state, cx| state.focus(window, cx));
+    }
 }
 
 impl Render for LauncherView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let list = self.list.clone();
 
         div()
-            .id("launcher-root")
-            .key_context("Launcher")
-            .on_action(cx.listener(Self::on_cancel))
-            .on_action(cx.listener(Self::on_confirm))
             .w(px(680.))
             .h(px(440.))
             .rounded_lg()
@@ -141,22 +140,11 @@ impl Render for LauncherView {
             .border_1()
             .border_color(gpui::rgba(0x3a3a3c_80))
             .shadow_lg()
-            .overflow_hidden()
-            .child(
-                List::new(&list)
-                    .w_full()
-                    .h_full()
-                    .search_placeholder("Search apps..."),
-            )
-    }
-}
-
-impl LauncherView {
-    fn on_cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.hide();
-    }
-
-    fn on_confirm(&mut self, _: &Confirm, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.hide();
+            .overflow_hidden().child(
+            List::new(&list)
+                .w_full()
+                .h_full()
+                .search_placeholder("Search apps..."),
+        )
     }
 }

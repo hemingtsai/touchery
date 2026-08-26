@@ -8,6 +8,7 @@ gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 gpui-component = "0.5.1"
 global-hotkey = "0.8"
 pinyin = "0.10"
+objc = "0.2"
 anyhow = "1"
 
 [profile.release]
