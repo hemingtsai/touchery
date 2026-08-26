@@ -56,6 +56,11 @@ fn main() {
     Application::new().with_assets(Assets).run(|cx| {
         gpui_component::init(cx);
 
+        // Root paints the theme background over the whole window; make it
+        // fully transparent so the launcher card floats over a clear window.
+        // The control panel paints its own opaque background and is unaffected.
+        gpui_component::Theme::global_mut(cx).background = gpui::hsla(0.0, 0.0, 0.0, 0.0);
+
         set_accessory_policy();
 
         let config = config::Config::load();
@@ -230,11 +235,9 @@ fn toggle_launcher(cx: &mut App) {
             |window, cx| {
                 let launcher = cx.new(|cx| launcher::LauncherView::new(window, cx));
                 launcher.update(cx, |v, cx| v.focus_query(window, cx));
-                // No Root wrapper: Root paints an opaque theme background over
-                // the whole window, which would show around the shrunken
-                // secondary-input card. The launcher needs none of Root's
-                // dialog/notification layers.
-                launcher
+                // Root wrapper is required: gpui-component internals call
+                // Root::update on every window and panic otherwise.
+                cx.new(|cx| Root::new(launcher, window, cx))
             },
         )
         .expect("Failed to open launcher window");
