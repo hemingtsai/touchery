@@ -19,7 +19,7 @@ pub fn launcher_size() -> gpui::Size<Pixels> {
 // ---- settings window ----
 
 pub const SETTINGS_WIDTH: f32 = 560.0;
-pub const SETTINGS_HEIGHT: f32 = 440.0;
+pub const SETTINGS_HEIGHT: f32 = 520.0;
 pub const SETTINGS_MIN_WIDTH: f32 = 420.0;
 pub const SETTINGS_MIN_HEIGHT: f32 = 320.0;
 
