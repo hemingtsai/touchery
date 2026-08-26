@@ -242,6 +242,11 @@ fn toggle_launcher(cx: &mut App) {
         )
         .expect("Failed to open launcher window");
 
+    // The launcher window is mostly transparent; the native macOS shadow
+    // would outline the entire invisible window rectangle. Turn it off —
+    // the card draws its own CSS shadow.
+    disable_key_window_shadow();
+
     cx.global::<LauncherWindowState>()
         .launcher_window
         .borrow_mut()
@@ -326,10 +331,35 @@ fn set_accessory_policy() {
     use objc::runtime::Object;
     use objc::sel;
     use objc::sel_impl;
+
     unsafe {
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
         // NSApplicationActivationPolicyAccessory = 1
         let _: () = msg_send![app, setActivationPolicy: 1i64];
+    }
+}
+
+/// Turn off the native shadow of the current key window. Called right after
+/// the launcher window is opened (it is key at that point). gpui exposes no
+/// shadow toggle, and the native shadow would outline the full transparent
+/// window rectangle.
+fn disable_key_window_shadow() {
+    use objc::class;
+    use objc::msg_send;
+    use objc::runtime::{Object, NO};
+    use objc::sel;
+    use objc::sel_impl;
+
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let key_window: *mut Object = msg_send![app, keyWindow];
+        if key_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![key_window, setHasShadow: NO];
     }
 }
 
