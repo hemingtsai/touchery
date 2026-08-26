@@ -19,6 +19,7 @@ use gpui::*;
 use gpui_component::Root;
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -56,6 +57,8 @@ struct LauncherWindowState {
     hotkey_id: Arc<RwLock<u32>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
+    /// Flag to notify launcher that apps list was updated.
+    apps_updated: Arc<AtomicBool>,
 }
 
 impl Global for LauncherWindowState {}
@@ -118,6 +121,8 @@ fn main() {
             }
         };
 
+        let apps_updated = Arc::new(AtomicBool::new(false));
+
         cx.set_global(LauncherWindowState {
             launcher_window: RefCell::new(None),
             settings_window: RefCell::new(None),
@@ -127,6 +132,7 @@ fn main() {
             hotkey_id: hotkey_id.clone(),
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
+            apps_updated: apps_updated.clone(),
         });
 
         // Bind Escape globally so the launcher window can dismiss itself.
@@ -161,6 +167,7 @@ fn main() {
         let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
         let watcher_clone = watcher_ref.clone();
         let apps_index_clone = apps_index.clone();
+        let apps_updated_clone = apps_updated.clone();
         let mut last_event_time: Option<Instant> = None;
         const DEBOUNCE_MS: u64 = 1000; // 1 second debounce
         cx.spawn(async move |cx| loop {
@@ -191,11 +198,13 @@ fn main() {
                                 watcher::AppEvent::Created(path) => {
                                     let mut apps = apps_index_clone.write().unwrap();
                                     apps::add_app_to_index(&path, &mut apps);
+                                    apps_updated_clone.store(true, Ordering::SeqCst);
                                     last_event_time = Some(now);
                                 }
                                 watcher::AppEvent::Removed(path) => {
                                     let mut apps = apps_index_clone.write().unwrap();
                                     apps::remove_app_from_index(&path, &mut apps);
+                                    apps_updated_clone.store(true, Ordering::SeqCst);
                                     last_event_time = Some(now);
                                 }
                                 watcher::AppEvent::Modified(_) => {
@@ -378,6 +387,13 @@ pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
         .read()
         .unwrap()
         .clone()
+}
+
+/// Check if apps index was updated since last check and reset the flag.
+pub fn check_apps_updated(cx: &App) -> bool {
+    cx.global::<LauncherWindowState>()
+        .apps_updated
+        .swap(false, Ordering::SeqCst)
 }
 
 pub fn plugin_manager(cx: &App) -> Arc<std::sync::Mutex<plugins::PluginManager>> {
