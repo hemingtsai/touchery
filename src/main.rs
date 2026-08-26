@@ -12,6 +12,7 @@ mod themes;
 mod tray;
 mod ui_theme;
 mod ui_settings;
+mod watcher;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -20,6 +21,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
 
 /// Embedded assets (icons etc.).
 struct Assets;
@@ -139,6 +141,10 @@ fn main() {
             })
             .detach();
 
+        // Start file system watcher for new/removed apps
+        let watcher = watcher::AppWatcher::new();
+        let watcher_ref = Arc::new(std::cell::RefCell::new(Some(watcher)));
+
         // Load plugins in the background once at startup.
         let pm_ref = plugin_manager.clone();
         cx.background_executor()
@@ -153,6 +159,10 @@ fn main() {
         // 50ms (~20 wakeups/s) — negligible, and it also lets us re-read the
         // current hotkey id from the global after runtime changes.
         let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+        let watcher_clone = watcher_ref.clone();
+        let apps_index_clone = apps_index.clone();
+        let mut last_event_time: Option<Instant> = None;
+        const DEBOUNCE_MS: u64 = 1000; // 1 second debounce
         cx.spawn(async move |cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(50))
@@ -164,6 +174,38 @@ fn main() {
                     tray::MENU_OPEN_PANEL => open_settings(cx),
                     _ => {}
                 });
+            }
+
+            // Handle app file system events with debouncing
+            if let Ok(watcher_guard) = watcher_clone.try_borrow() {
+                if let Some(ref watcher) = *watcher_guard {
+                    while let Some(event) = watcher.try_recv() {
+                        let now = Instant::now();
+                        let should_update = match last_event_time {
+                            None => true,
+                            Some(last) => now.duration_since(last).as_millis() > DEBOUNCE_MS as u128,
+                        };
+
+                        if should_update {
+                            match event {
+                                watcher::AppEvent::Created(path) => {
+                                    let mut apps = apps_index_clone.write().unwrap();
+                                    apps::add_app_to_index(&path, &mut apps);
+                                    last_event_time = Some(now);
+                                }
+                                watcher::AppEvent::Removed(path) => {
+                                    let mut apps = apps_index_clone.write().unwrap();
+                                    apps::remove_app_from_index(&path, &mut apps);
+                                    last_event_time = Some(now);
+                                }
+                                watcher::AppEvent::Modified(_) => {
+                                    // For modified apps, we could re-index, but for now
+                                    // we'll treat it as a no-op since the app is still there
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             while let Ok(event) = receiver.try_recv() {
