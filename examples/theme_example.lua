@@ -14,6 +14,7 @@ return {
         card_border  = "#d8cfc099",
         panel_bg     = "#f4efe6FC",
         row_bg       = "#0000000D",
+        hover_bg     = "#00000018",
         input_bg     = "#FFFFFFD9",
         input_border = "#b3a89455",
         text_primary = "#2b2620FF",
@@ -28,6 +29,7 @@ return {
         card_border  = "#5a4c3c80",
         panel_bg     = "#28221cFC",
         row_bg       = "#ffffff08",
+        hover_bg     = "#ffffff14",
         input_bg     = "#ffffff14",
         input_border = "#ffffff26",
         -- 未定义的 text_* 与 accent_* 回退到内置暗色值

@@ -23,6 +23,8 @@ pub struct Palette {
     pub card_border: Hsla,
     pub panel_bg: Hsla,
     pub row_bg: Hsla,
+    /// Hover background for list items — more opaque than `row_bg`.
+    pub hover_bg: Hsla,
     pub input_bg: Hsla,
     pub input_border: Hsla,
     pub text_primary: Hsla,
@@ -39,6 +41,7 @@ pub struct PartialPalette {
     pub card_border: Option<Hsla>,
     pub panel_bg: Option<Hsla>,
     pub row_bg: Option<Hsla>,
+    pub hover_bg: Option<Hsla>,
     pub input_bg: Option<Hsla>,
     pub input_border: Option<Hsla>,
     pub text_primary: Option<Hsla>,
@@ -57,6 +60,7 @@ impl PartialPalette {
             "row_bg" => self.row_bg = Some(value),
             "input_bg" => self.input_bg = Some(value),
             "input_border" => self.input_border = Some(value),
+            "hover_bg" => self.hover_bg = Some(value),
             "text_primary" => self.text_primary = Some(value),
             "text_secondary" => self.text_secondary = Some(value),
             "accent_info" => self.accent_info = Some(value),
@@ -72,6 +76,7 @@ impl PartialPalette {
         if let Some(v) = self.card_border { p.card_border = v; }
         if let Some(v) = self.panel_bg { p.panel_bg = v; }
         if let Some(v) = self.row_bg { p.row_bg = v; }
+        if let Some(v) = self.hover_bg { p.hover_bg = v; }
         if let Some(v) = self.input_bg { p.input_bg = v; }
         if let Some(v) = self.input_border { p.input_border = v; }
         if let Some(v) = self.text_primary { p.text_primary = v; }
@@ -86,6 +91,7 @@ impl PartialPalette {
             && self.card_border.is_none()
             && self.panel_bg.is_none()
             && self.row_bg.is_none()
+            && self.hover_bg.is_none()
             && self.input_bg.is_none()
             && self.input_border.is_none()
             && self.text_primary.is_none()
@@ -102,6 +108,7 @@ fn builtin_dark() -> Palette {
         card_border: gpui::rgba(0x3a3a3c_80).into(),
         panel_bg: gpui::rgba(0x1e1e22_fc).into(),
         row_bg: gpui::rgba(0xffffff_08).into(),
+        hover_bg: gpui::rgba(0xffffff_14).into(),
         input_bg: gpui::rgba(0xffffff_14).into(),
         input_border: gpui::rgba(0xffffff_26).into(),
         text_primary: gpui::rgba(0xffffff_ff).into(),
@@ -118,6 +125,7 @@ fn builtin_light() -> Palette {
         card_border: gpui::rgba(0xb9bac2_99).into(),
         panel_bg: gpui::rgba(0xeeeff4_fc).into(),
         row_bg: gpui::rgba(0x000000_0d).into(),
+        hover_bg: gpui::rgba(0x000000_18).into(),
         input_bg: gpui::rgba(0xffffff_d9).into(),
         input_border: gpui::rgba(0x8a8a94_55).into(),
         text_primary: gpui::rgba(0x17171c_ff).into(),

@@ -171,7 +171,7 @@ impl SettingsView {
             .bg(if is_active { pal.row_bg } else { gpui::transparent_black() })
             .border_1()
             .border_color(if is_active { pal.accent_info } else { pal.input_border })
-            .hover(|s| s.bg(pal.row_bg))
+            .hover(|s| s.bg(pal.hover_bg))
             .cursor_pointer()
             .child(
                 div()

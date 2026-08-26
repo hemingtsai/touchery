@@ -95,6 +95,7 @@ impl ListDelegate for LauncherDelegate {
             Row::App(app_idx) => self.apps[*app_idx].display_name.clone(),
             Row::Plugin { plugin_name, item } => format!("{}:{}", plugin_name, item.title),
         };
+        let pal = themes::palette(cx);
         Some(ListItem::new(ix).child(
             div()
                 .flex()
@@ -102,7 +103,8 @@ impl ListDelegate for LauncherDelegate {
                 .px_4()
                 .py_2()
                 .rounded_md()
-                .child(div().text_size(px(14.0)).text_color(themes::palette(cx).text_primary).child(text)),
+                .hover(|s| s.bg(pal.hover_bg))
+                .child(div().text_size(px(14.0)).text_color(pal.text_primary).child(text)),
         ))
     }
 
