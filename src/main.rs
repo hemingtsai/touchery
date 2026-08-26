@@ -183,15 +183,23 @@ pub fn open_settings(cx: &mut App) {
         .replace(handle.into());
 }
 
-pub fn close_settings(cx: &mut App) {
-    let existing = cx
-        .global::<LauncherWindowState>()
+/// Dismiss the settings window from inside its own update cycle (event
+/// handlers). Same rationale as `dismiss_launcher`.
+pub fn dismiss_settings(window: &mut Window, cx: &mut App) {
+    cx.global::<LauncherWindowState>()
         .settings_window
         .borrow_mut()
         .take();
-    if let Some(handle) = existing {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-    }
+    window.remove_window();
+}
+
+/// Whether the given handle is the control panel window.
+pub fn is_settings_window(cx: &App, handle: AnyWindowHandle) -> bool {
+    cx.global::<LauncherWindowState>()
+        .settings_window
+        .borrow()
+        .map(|h| h == handle)
+        .unwrap_or(false)
 }
 
 fn toggle_launcher(cx: &mut App) {

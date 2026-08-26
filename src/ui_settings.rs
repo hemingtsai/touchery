@@ -51,14 +51,23 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Global keystroke observer: captures the hotkey while recording.
+    /// Global keystroke observer: captures the hotkey while recording, and
+    /// closes the panel on Esc otherwise.
     fn on_any_keystroke(
         &mut self,
         event: &KeystrokeEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.recording {
+            // Esc closes the control panel.
+            if event.keystroke.key == "escape"
+                && event.keystroke.modifiers.number_of_modifiers() == 0
+                && crate::is_settings_window(cx, window.window_handle())
+            {
+                cx.stop_propagation();
+                crate::dismiss_settings(window, cx);
+            }
             return;
         }
 
@@ -235,10 +244,23 @@ impl Render for SettingsView {
         // ---- header ----
         root = root.child(
             div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::white())
-                .child("控制面板"),
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(gpui::white())
+                        .child("控制面板"),
+                )
+                .child(
+                    Button::new("close-settings")
+                        .label("关闭 (Esc)")
+                        .on_click(|_, window, cx| {
+                            crate::dismiss_settings(window, cx);
+                        }),
+                ),
         );
 
         // ---- hotkey section ----

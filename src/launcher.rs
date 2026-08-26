@@ -412,6 +412,9 @@ impl Render for LauncherView {
             }))
             .w(px(680.))
             .h(px(440.))
+            // Secondary-input mode only shows the input box; shrink the card
+            // to fit so there is no dead space below.
+            .when(matches!(mode, Mode::SubInput { .. }), |card| card.h_auto())
             .rounded_lg()
             .bg(gpui::rgba(0x1a1a1e_f0))
             .border_1()
