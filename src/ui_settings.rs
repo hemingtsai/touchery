@@ -431,7 +431,7 @@ impl Render for SettingsView {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(pal.text_secondary)
-                                .child("开启后禁用 > 插件路由，下次唤起启动器生效"),
+                                .child("只在 Application 文件夹内索引，支持 路径/模糊 搜索（如 shiyong/cipan）；下次唤起生效"),
                         ),
                 )
                 .child(

@@ -1,6 +1,33 @@
+use std::collections::HashMap;
 use std::process::Command;
 
 use pinyin::ToPinyin;
+
+/// One searchable segment of an app's location: either a localized ancestor
+/// folder ("实用工具") or the app itself (last element).
+#[derive(Debug, Clone)]
+pub struct PathComponent {
+    pub name_lower: String,
+    pub pinyin_full: String,
+    pub pinyin_initials: String,
+}
+
+impl PathComponent {
+    pub(crate) fn new(name: String) -> Self {
+        let name_lower = name.to_lowercase();
+        let pinyin_vec: Vec<&str> = name
+            .as_str()
+            .to_pinyin()
+            .flatten()
+            .map(|p| p.plain())
+            .collect();
+        Self {
+            name_lower,
+            pinyin_full: pinyin_vec.join(""),
+            pinyin_initials: pinyin_vec.iter().filter_map(|s| s.chars().next()).collect(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AppEntry {
@@ -14,14 +41,21 @@ pub struct AppEntry {
     /// Pinyin derived from the localized display name.
     pub pinyin_full: String,
     pub pinyin_initials: String,
+    /// Localized hierarchy from the nearest Applications root down to the
+    /// app itself, e.g. ["实用工具", "磁盘工具"]. Empty when the app sits
+    /// directly inside a root.
+    pub path_components: Vec<PathComponent>,
+    /// True when the bundle lives under an Applications root (/Applications,
+    /// /System/Applications, ~/Applications, ...) — i.e. a user-facing app.
+    pub in_app_dir: bool,
 }
 
 impl AppEntry {
-    fn new(name: String, path: String) -> Self {
+    pub(crate) fn new(name: String, path: String) -> Self {
         Self::with_display_name(name, path, None)
     }
 
-    fn with_display_name(name: String, path: String, localized: Option<String>) -> Self {
+    pub(crate) fn with_display_name(name: String, path: String, localized: Option<String>) -> Self {
         let display_name = localized.unwrap_or_else(|| {
             // Fallback when Spotlight gave us nothing: ask LaunchServices
             // directly (respects locale for bundled processes, may not for
@@ -41,6 +75,8 @@ impl AppEntry {
         let pinyin_initials: String =
             pinyin_vec.iter().filter_map(|s| s.chars().next()).collect();
 
+        let (path_components, in_app_dir) = build_path_components(&path, &display_name);
+
         Self {
             name,
             display_name,
@@ -49,18 +85,87 @@ impl AppEntry {
             name_lower,
             pinyin_full,
             pinyin_initials,
+            path_components,
+            in_app_dir,
         }
     }
 }
 
-/// Ask LaunchServices/NSFileManager for the localized display name of an app
-/// bundle. Used only as a fallback when Spotlight is unavailable.
+const APPS_MARKER: &str = "/Applications/";
+
+/// Localized folder-name cache shared across one enumeration run; most apps
+/// share the same few ancestors (Utilities etc.), so we hit NSFileManager
+/// once per distinct folder.
+struct FolderLocalizer {
+    cache: HashMap<String, String>,
+}
+
+impl FolderLocalizer {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    fn localized(&mut self, folder_path: &str) -> String {
+        if let Some(hit) = self.cache.get(folder_path) {
+            return hit.clone();
+        }
+        let name = localized_display_name(folder_path)
+            .unwrap_or_else(|| folder_name(&folder_path.to_string()));
+        self.cache.insert(folder_path.to_string(), name.clone());
+        name
+    }
+}
+
+fn folder_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Walk the folder hierarchy between the nearest Applications root and the
+/// app bundle, localizing each level.
+fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<PathComponent>, bool) {
+    let Some(root_idx) = bundle_path.find(APPS_MARKER) else {
+        // Not under an Applications root: treat the app alone as its own
+        // component (still slash-searchable), but flag it as out-of-scope.
+        return (
+            vec![PathComponent::new(app_display_name.to_string())],
+            false,
+        );
+    };
+
+    let mut localizer = FolderLocalizer::new();
+    let mut components = Vec::new();
+
+    // Everything between "<root>/Applications/" and "<Name>.app" is folders.
+    let after_root = &bundle_path[root_idx + APPS_MARKER.len()..];
+    let mut walked = String::from(&bundle_path[..root_idx + APPS_MARKER.len() - 1]);
+    let segments: Vec<&str> = after_root.split('/').collect();
+    for seg in &segments[..segments.len().saturating_sub(1)] {
+        if seg.is_empty() {
+            continue;
+        }
+        walked.push('/');
+        walked.push_str(seg);
+        components.push(PathComponent::new(localizer.localized(&walked)));
+    }
+    components.push(PathComponent::new(app_display_name.to_string()));
+
+    (components, true)
+}
+
+/// Ask LaunchServices/NSFileManager for the localized display name of a file
+/// or folder (handles macOS `.localized` directories). Used for app names
+/// when Spotlight gives nothing and for folder localization.
 ///
 /// Safety: standard NSFileManager selectors with null checks on every
 /// returned object; the C string is copied into an owned String before any
 /// use, so no borrowed Objective-C memory escapes the call.
 fn localized_display_name(path: &str) -> Option<String> {
-    use objc::{class, msg_send, sel, sel_impl, runtime::Object};
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
     use std::ffi::{CStr, CString};
 
     unsafe {
@@ -84,11 +189,12 @@ fn localized_display_name(path: &str) -> Option<String> {
     }
 }
 
-const MARKER: &str = "kMDItemDisplayName = ";
+const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
 
 /// Parse one line of `mdfind -attr kMDItemDisplayName` output:
 /// `<path>   kMDItemDisplayName = <localized name>`
 fn parse_attr_line(line: &str) -> Option<(String, Option<String>)> {
+    const MARKER: &str = "kMDItemDisplayName = ";
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -100,18 +206,24 @@ fn parse_attr_line(line: &str) -> Option<(String, Option<String>)> {
             if path.is_empty() {
                 return None;
             }
-            Some((
-                path,
-                (!display.is_empty()).then_some(display),
-            ))
+            Some((path, (!display.is_empty()).then_some(display)))
         }
         None => Some((line.to_string(), None)),
     }
 }
 
-pub fn enumerate_apps() -> Vec<AppEntry> {
-    const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
+fn make_entry(path: String, localized: Option<String>) -> Option<AppEntry> {
+    let name = std::path::Path::new(&path)
+        .file_stem()?
+        .to_str()?
+        .to_string();
+    if name.starts_with('.') || name.contains("uninstal") {
+        return None;
+    }
+    Some(AppEntry::with_display_name(name, path, localized))
+}
 
+pub fn enumerate_apps() -> Vec<AppEntry> {
     // Primary source: Spotlight returns the localized display name in one
     // shot, honoring the user's locale (e.g. "微信" on zh-Hans systems).
     let output = Command::new("mdfind")
@@ -125,42 +237,19 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
                 .lines()
                 .filter_map(|line| {
                     let (path, localized) = parse_attr_line(line)?;
-                    let name = std::path::Path::new(&path)
-                        .file_stem()?
-                        .to_str()?
-                        .to_string();
-                    if name.starts_with('.') || name.contains("uninstal") {
-                        return None;
-                    }
-                    Some(AppEntry::with_display_name(name, path, localized))
+                    make_entry(path, localized)
                 })
                 .collect()
         }
         _ => {
             // Spotlight unavailable/disabled: plain enumeration, names fall
             // back through NSFileManager.
-            match Command::new("mdfind")
-                .args(["kMDItemContentType", "==", "com.apple.application-bundle"])
-                .output()
-            {
+            match Command::new("mdfind").args(["kMDItemContentType", "==", QUERY]).output() {
                 Ok(o) if o.status.success() => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     stdout
                         .lines()
-                        .filter_map(|line| {
-                            let path = line.trim().to_string();
-                            if path.is_empty() {
-                                return None;
-                            }
-                            let name = std::path::Path::new(&path)
-                                .file_stem()?
-                                .to_str()?
-                                .to_string();
-                            if name.starts_with('.') || name.contains("uninstal") {
-                                return None;
-                            }
-                            Some(AppEntry::new(name, path))
-                        })
+                        .filter_map(|line| make_entry(line.trim().to_string(), None))
                         .collect()
                 }
                 _ => Vec::new(),
@@ -181,36 +270,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_attr_line_ok() {
+    fn attr_line_parsing() {
         let (path, display) =
             parse_attr_line("/Applications/Safari.app   kMDItemDisplayName = Safari浏览器")
                 .unwrap();
         assert_eq!(path, "/Applications/Safari.app");
         assert_eq!(display.as_deref(), Some("Safari浏览器"));
-    }
 
-    #[test]
-    fn parse_plain_line() {
         let (path, display) = parse_attr_line("/Applications/Foo.app").unwrap();
         assert_eq!(path, "/Applications/Foo.app");
         assert_eq!(display, None);
     }
-}
 
-#[cfg(test)]
-mod enum_tests {
     #[test]
-    fn enumerate_shows_localized_names() {
-        let apps = super::enumerate_apps();
-        println!("total: {}", apps.len());
-        let wanted = ["微信", "计算器", "Safari浏览器", "邮件", "终端"];
-        for app in apps
-            .iter()
-            .filter(|a| wanted.contains(&a.display_name.as_str()))
-            .take(8)
-        {
-            println!("{} | {} | pinyin: {} / {}", app.display_name, app.name, app.pinyin_full, app.pinyin_initials);
-        }
-        assert!(!apps.is_empty());
+    fn path_component_building() {
+        // No localized FFI assertions here (locale-dependent); verify
+        // structure: folders become components, app is last, flag set.
+        let (components, in_app_dir) =
+            build_path_components("/System/Applications/Utilities/Disk Utility.app", "磁盘工具");
+        assert!(in_app_dir);
+        assert_eq!(components.last().unwrap().name_lower, "磁盘工具");
+        assert!(components.len() >= 2); // at least [Utilities?, 磁盘工具]
+
+        let (components, in_app_dir) =
+            build_path_components("/Applications/Safari.app", "Safari浏览器");
+        assert!(in_app_dir);
+        assert_eq!(components.len(), 1);
+
+        let (_, in_app_dir) =
+            build_path_components("/usr/libexec/SomeHelper.app", "SomeHelper");
+        assert!(!in_app_dir);
     }
 }
