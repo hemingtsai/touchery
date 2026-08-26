@@ -335,6 +335,67 @@ impl Render for SettingsView {
                 )
         };
 
+        // ---- general section ----
+        let launch_enabled = crate::autostart::is_enabled();
+        let entity = cx.entity();
+        root = root.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(title("通用".to_string()))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_2()
+                        .px_3()
+                        .rounded_md()
+                        .overflow_hidden()
+                        .bg(pal.row_bg)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_y_0p5()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .whitespace_nowrap()
+                                        .truncate()
+                                        .text_color(pal.text_primary)
+                                        .child("登录时自动启动"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .whitespace_nowrap()
+                                        .truncate()
+                                        .text_color(pal.text_secondary)
+                                        .child("通过用户 LaunchAgent 实现；移动应用位置后需重新开启"),
+                                ),
+                        )
+                        .child(
+                            Switch::new("launch-at-login")
+                                .flex_shrink_0()
+                                .checked(launch_enabled)
+                                .on_click(move |checked: &bool, _window, cx| {
+                                    let result = crate::autostart::set_enabled(*checked);
+                                    entity.update(cx, |_, cx| {
+                                        if let Err(e) = result {
+                                            eprintln!("[autostart] failed: {e:#}");
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                ),
+        );
+
         // ---- hotkey section ----
         root = root.child(
             div()

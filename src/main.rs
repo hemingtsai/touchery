@@ -2,6 +2,7 @@
 // which cargo cannot know about; silence the resulting false-positive lints.
 #![allow(unexpected_cfgs)]
 mod apps;
+mod autostart;
 mod config;
 mod hotkey;
 mod launcher;
@@ -200,7 +201,7 @@ pub fn open_settings(cx: &mut App) {
                 kind: WindowKind::Normal,
                 is_resizable: true,
                 is_minimizable: true,
-                window_min_size: Some(ui_theme::settings_size()),
+                window_min_size: Some(ui_theme::settings_min_size()),
                 focus: true,
                 ..Default::default()
             },

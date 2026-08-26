@@ -21,6 +21,7 @@
 |---|---|
 | 全局热键 | 默认 `⌘⇧Space`，可在控制面板自定义；按下唤起/再按关闭 |
 | 常驻后台 | Accessory 模式，无 Dock 图标；菜单栏闪电图标提供「打开控制面板 / 退出」 |
+| 开机启动 | 控制面板开关，基于用户 LaunchAgent（`~/Library/LaunchAgents/com.touchery.app.plist`） |
 | 应用搜索 | 模糊匹配 + 拼音全拼 + 拼音首字母，按系统 locale 显示本地化名称（中文系统显示「微信」「计算器」） |
 | 插件系统 | LuaJIT 脚本，`>` 前缀路由，支持二级输入 |
 | Lua 主题 | 亮暗色定义在同一个 `.lua` 文件中，控制面板选择，未定义颜色回退内置主题，自动跟随系统深浅色 |
@@ -77,8 +78,9 @@ cargo build --release
 
 ### 控制面板
 
-从菜单栏闪电图标 → 「打开控制面板」打开（标准窗口，可调整大小，`Esc` 或红点关闭）：
+从菜单栏闪电图标 → 「打开控制面板」打开（标准窗口，560×440 起始、可调整大小，`Esc` 或红点关闭）：
 
+- **通用**：「登录时自动启动」开关——写入/移除用户 LaunchAgent 并即时 `launchctl load`；移动应用位置后需重新开启
 - **修改快捷键**：点击按钮进入录制态 → 按下任意组合键（至少一个修饰键 ⌘/⌥/⌃）→ 即时注册生效并保存；`Esc` 或再点按钮取消录制
 - **主题选择**：列出内置主题与 `themes` 目录下所有 `.lua` 主题，点击即时切换并持久化
 - **仅搜索应用程序**：开启后索引范围限定在 Application 文件夹内的用户级应用（排除系统深处的 helper），并支持 `/` 分段的路径层级搜索；不影响插件路由（下次唤起启动器生效）
@@ -239,6 +241,7 @@ return {
 | `~/Library/Application Support/touchery/plugins/*.lua` | 插件 |
 | `~/Library/Application Support/touchery/themes/*.lua` | 主题 |
 | `~/Library/Application Support/touchery/config.json` | 快捷键 + 插件开关 + 当前主题 |
+| `~/Library/LaunchAgents/com.touchery.app.plist` | 开机启动 LaunchAgent（由控制面板管理） |
 | `~/Library/Application Support/touchery/plugin.log` | 示例插件输出（仅示例写入） |
 
 ## 架构
