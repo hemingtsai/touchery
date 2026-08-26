@@ -6,6 +6,7 @@ use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::{IndexPath, Sizable as _};
+use crate::ui_theme::*;
 use std::sync::Arc;
 
 actions!(launcher, [LauncherCancel]);
@@ -313,7 +314,9 @@ impl LauncherView {
             Row::App(app_idx) => {
                 let path = crate::app_index(cx)[app_idx].path.clone();
                 std::thread::spawn(move || {
-                    let _ = std::process::Command::new("open").arg(&path).spawn();
+                    if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+                        eprintln!("[launcher] failed to open {path}: {e}");
+                    }
                 });
                 crate::dismiss_launcher(window, cx);
             }
@@ -410,15 +413,15 @@ impl Render for LauncherView {
                     _ => {}
                 }
             }))
-            .w(px(680.))
-            .h(px(440.))
+            .w(px(LAUNCHER_WIDTH))
+            .h(px(LAUNCHER_HEIGHT))
             // Secondary-input mode only shows the input box; shrink the card
             // to fit so there is no dead space below.
             .when(matches!(mode, Mode::SubInput { .. }), |card| card.h_auto())
             .rounded_lg()
-            .bg(gpui::rgba(0x1a1a1e_f0))
+            .bg(CARD_BG)
             .border_1()
-            .border_color(gpui::rgba(0x3a3a3c_80))
+            .border_color(CARD_BORDER)
             .shadow_lg()
             .overflow_hidden();
 
@@ -435,7 +438,7 @@ impl Render for LauncherView {
                                 .prefix(
                                     svg()
                                         .path("icons/search.svg")
-                                        .text_color(gpui::rgba(0xffffff_77))
+                                        .text_color(TEXT_SECONDARY)
                                         .size_4(),
                                 )
                                 .large(),
@@ -457,7 +460,7 @@ impl Render for LauncherView {
                         .flex_col()
                         .gap_2()
                         .text_size(px(12.0))
-                        .text_color(gpui::rgba(0xffffff_88))
+                        .text_color(TEXT_SECONDARY)
                         .child(format!(
                             "↳ {}:{} — 二级输入，Esc 返回",
                             plugin_name, title

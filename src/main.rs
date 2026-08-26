@@ -5,6 +5,7 @@ mod launcher;
 mod plugins;
 mod search;
 mod tray;
+mod ui_theme;
 mod ui_settings;
 
 use gpui::prelude::*;
@@ -121,6 +122,11 @@ fn main() {
             })
             .detach();
 
+        // Polling loop: the global-hotkey and tray-icon crates expose plain
+        // crossbeam/flume receivers with no async integration, so we poll on
+        // the executor's background timer. Cost is one non-blocking recv per
+        // 50ms (~20 wakeups/s) — negligible, and it also lets us re-read the
+        // current hotkey id from the global after runtime changes.
         let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
         cx.spawn(async move |cx| loop {
             cx.background_executor()
@@ -167,7 +173,7 @@ pub fn open_settings(cx: &mut App) {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                     point(px(0.), px(0.)),
-                    size(px(420.), px(320.)),
+                    ui_theme::settings_size(),
                 ))),
                 titlebar: None,
                 kind: WindowKind::Floating,
@@ -326,6 +332,13 @@ pub fn reregister_current(cx: &mut App) -> anyhow::Result<()> {
     apply_hotkey(cx, hk)
 }
 
+/// Set NSApplicationActivationPolicyAccessory so the app runs as a menu-bar
+/// (tray) application without a Dock icon. gpui hardcodes `.regular` at
+/// startup and exposes no API for this, hence the direct msg_send.
+///
+/// Safety: `sharedApplication` is guaranteed to exist once AppKit is
+/// initialized (gpui's platform layer has already run); `setActivationPolicy:`
+/// takes an NSInteger. Both selectors are stable, public macOS API.
 fn set_accessory_policy() {
     use objc::class;
     use objc::msg_send;
@@ -344,6 +357,10 @@ fn set_accessory_policy() {
 /// the launcher window is opened (it is key at that point). gpui exposes no
 /// shadow toggle, and the native shadow would outline the full transparent
 /// window rectangle.
+///
+/// Safety: standard NSApplication/NSWindow selectors, null-checked. If the
+/// key window cannot be resolved the call is a no-op (worst case: the shadow
+/// remains visible).
 fn disable_key_window_shadow() {
     use objc::class;
     use objc::msg_send;
@@ -381,9 +398,18 @@ unsafe impl objc::Encode for NSPoint {
 }
 
 fn mouse_location() -> Option<NSPoint> {
+    use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
     unsafe {
-        let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        // +[NSEvent mouseLocation] returns an NSPoint by value (never NULL);
+        // the only failure mode is a missing NSEvent class, which cannot
+        // happen on any macOS version this app supports. We still guard
+        // against a null class pointer for soundness.
+        let ns_event: *mut Object = msg_send![class!(NSEvent), class];
+        if ns_event.is_null() {
+            return None;
+        }
+        let point: NSPoint = msg_send![ns_event, mouseLocation];
         Some(point)
     }
 }
@@ -393,8 +419,8 @@ fn mouse_location() -> Option<NSPoint> {
 /// height. Returns the bounds plus that display's id.
 fn compute_spotlight_bounds(cx: &App) -> (Bounds<Pixels>, Option<DisplayId>) {
     let displays = cx.displays();
-    let w = px(680.0);
-    let h = px(440.0);
+    let launcher_size = ui_theme::launcher_size();
+    let (w, h) = (launcher_size.width, launcher_size.height);
 
     let mut target = cx.primary_display();
     if let Some(point) = mouse_location() {
@@ -417,13 +443,14 @@ fn compute_spotlight_bounds(cx: &App) -> (Bounds<Pixels>, Option<DisplayId>) {
 
     let Some(display) = target else {
         return (
-            Bounds::new(point(px(100.), px(100.)), size(w, h)),
+            Bounds::new(point(px(100.), px(100.)), gpui::size(w, h)),
             None,
         );
     };
 
     let db = display.bounds();
     let x = db.origin.x + (db.size.width - w) / 2.0;
-    let y = db.origin.y + db.size.height * 0.30;
+    let y = db.origin.y
+        + db.size.height * ui_theme::LAUNCHER_TOP_RATIO as f32;
     (Bounds::new(Point::new(x, y), Size::new(w, h)), Some(display.id()))
 }

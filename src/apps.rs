@@ -55,6 +55,10 @@ impl AppEntry {
 
 /// Ask LaunchServices/NSFileManager for the localized display name of an app
 /// bundle. Used only as a fallback when Spotlight is unavailable.
+///
+/// Safety: standard NSFileManager selectors with null checks on every
+/// returned object; the C string is copied into an owned String before any
+/// use, so no borrowed Objective-C memory escapes the call.
 fn localized_display_name(path: &str) -> Option<String> {
     use objc::{class, msg_send, sel, sel_impl, runtime::Object};
     use std::ffi::{CStr, CString};
@@ -164,10 +168,11 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
         }
     };
 
-    // Sort by the visible (localized) name and drop duplicate bundles.
+    // Sort by the visible (localized) name, then drop duplicates in a single
+    // pass: identical paths and identical display names are both adjacent
+    // after this sort.
     entries.sort_by(|a, b| a.display_name_lower.cmp(&b.display_name_lower));
-    entries.dedup_by(|a, b| a.path == b.path);
-    entries.dedup_by(|a, b| a.display_name_lower == b.display_name_lower);
+    entries.dedup_by(|a, b| a.display_name_lower == b.display_name_lower || a.path == b.path);
     entries
 }
 

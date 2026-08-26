@@ -1,4 +1,5 @@
 use crate::config::{Config, HotkeyConfig};
+use crate::ui_theme::*;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -178,11 +179,11 @@ impl SettingsView {
             "已停用".to_string()
         };
         let status_color = if plugin.error.is_some() {
-            gpui::rgba(0xff6b6b_ff)
+            ACCENT_ERROR
         } else if plugin.enabled && plugin.loaded {
-            gpui::rgba(0x7ee787_ff)
+            ACCENT_OK
         } else {
-            gpui::rgba(0xffffff_66)
+            TEXT_SECONDARY
         };
 
         div()
@@ -234,7 +235,7 @@ impl Render for SettingsView {
         let mut root = div()
             .id("settings-root")
             .size_full()
-            .bg(gpui::rgba(0x1e1e22_fc))
+            .bg(PANEL_BG)
             .p_6()
             .flex()
             .flex_col()
@@ -273,7 +274,7 @@ impl Render for SettingsView {
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(gpui::rgba(0xffffff_cc))
+                        .text_color(TEXT_PRIMARY.opacity(0.8))
                         .child("启动器快捷键"),
                 )
                 .child(
@@ -315,7 +316,7 @@ impl Render for SettingsView {
                 .children(self.saved_at.clone().map(|msg| {
                     div()
                         .text_size(px(12.0))
-                        .text_color(gpui::rgba(0x8ab4f8_ff))
+                        .text_color(ACCENT_INFO)
                         .child(msg)
                 })),
         );
@@ -325,7 +326,7 @@ impl Render for SettingsView {
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(gpui::rgba(0xffffff_cc))
+                .text_color(TEXT_PRIMARY.opacity(0.8))
                 .child(format!(
                     "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
                     plugins.len()
@@ -337,7 +338,7 @@ impl Render for SettingsView {
                 div()
                     .py_3()
                     .text_size(px(12.0))
-                    .text_color(gpui::rgba(0xffffff_55))
+                    .text_color(TEXT_SECONDARY)
                     .child("暂无插件，将 .lua 文件放入上述目录后重启应用"),
             );
         } else {

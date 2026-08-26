@@ -116,6 +116,8 @@ cargo build --release
 ~/Library/Application Support/touchery/plugins/
 ```
 
+（数据目录由 `dirs::data_dir()` 决定，不可用时回退到 `$HOME/Library/Application Support`；两者都不可用则禁用插件加载，绝不回退到当前工作目录。）
+
 将 `.lua` 文件放入该目录，重启应用即自动加载。每个插件拥有独立的 Lua runtime，互相隔离。
 
 ### API 契约
@@ -141,11 +143,13 @@ end
 function run(value, query)
 end
 
--- 函数三【必须】：二级输入回车后调用
+-- 函数三【必须】：二级输入回车后调用（sub=true 的条目确认后进入二级输入）
 -- value: 原 item 的 value 字段; sub_query: 用户二级输入的内容
 function run_sub(value, sub_query)
 end
 ```
+
+> 三个函数均为必需：缺少 `get_items`、`run` 或 `run_sub` 中任何一个，插件都会加载失败，原因显示在控制面板的插件状态中。
 
 ### 行为细节
 

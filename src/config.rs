@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Root directory for all persistent state.
+///
+/// Falls back to the home directory if the XDG-style data dir is unavailable;
+/// `None` only when even `$HOME` is unset (rare) — callers must handle it by
+/// disabling persistence instead of writing to an unpredictable location.
+pub fn data_root() -> Option<PathBuf> {
+    dirs::data_dir()
+        .or_else(dirs::home_dir)
+        .map(|dir| dir.join("touchery"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyConfig {
     #[serde(default)]
@@ -27,22 +38,34 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("touchery")
-            .join("config.json")
+    pub fn path() -> Option<PathBuf> {
+        data_root().map(|root| root.join("config.json"))
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("[config] failed to parse {}: {e}; using defaults", path.display());
+                    Self::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                eprintln!("[config] failed to read {}: {e}; using defaults", path.display());
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let path = Self::path();
+        let Some(path) = Self::path() else {
+            return Err(std::io::Error::other("no writable data directory"));
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

@@ -69,6 +69,12 @@ impl Plugin {
     }
 
     /// Call with an execution budget; converts budget overrun into a normal error.
+    ///
+    /// Concurrency invariant: the set_hook/remove_hook pair is not atomic, so
+    /// every caller must hold the `PluginManager` mutex while invoking this —
+    /// which serializes all Lua access and makes hook mutation safe. (The
+    /// launcher's background query task and run/run_sub threads all lock the
+    /// manager for the duration of the call.)
     fn with_budget<T>(lua: &Lua, f: impl FnOnce() -> mlua::Result<T>) -> anyhow::Result<T> {
         lua.set_hook(
             mlua::HookTriggers {
@@ -150,11 +156,12 @@ impl Plugin {
     }
 }
 
-pub fn plugins_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("touchery")
-        .join("plugins")
+/// Directory containing user plugins. Returns `None` when no data directory
+/// can be determined — plugin loading is then disabled entirely (never falls
+/// back to the current working directory, which would read arbitrary code
+/// relative to wherever the binary was launched).
+pub fn plugins_dir() -> Option<PathBuf> {
+    crate::config::data_root().map(|root| root.join("plugins"))
 }
 
 pub struct PluginManager {
@@ -166,7 +173,10 @@ impl PluginManager {
     /// Enabled state is taken from config (defaults to enabled).
     pub fn load_all(&mut self) {
         self.plugins.clear();
-        let dir = plugins_dir();
+        let Some(dir) = plugins_dir() else {
+            eprintln!("[plugins] no data directory available; plugin loading disabled");
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return;
         };
@@ -231,7 +241,9 @@ impl PluginManager {
         };
         plugin.enabled = enabled;
         if enabled && plugin.lua.is_none() {
-            let dir = plugins_dir();
+            let Some(dir) = plugins_dir() else {
+                anyhow::bail!("no data directory available");
+            };
             match Plugin::load(&dir.join(file_name)) {
                 Ok(mut loaded) => {
                     loaded.enabled = true;
