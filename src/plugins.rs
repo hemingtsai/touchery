@@ -28,7 +28,7 @@ pub struct Plugin {
 const INSTRUCTION_BUDGET: u32 = 20_000_000;
 
 impl Plugin {
-    fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+    pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let file_name = path
             .file_name()
             .context("no file name")?
@@ -217,5 +217,34 @@ impl PluginManager {
 
     pub fn find_by_name_mut(&mut self, name: &str) -> Option<&mut Plugin> {
         self.plugins.iter_mut().find(|p| p.name == name)
+    }
+
+    /// Enable/disable a plugin by file name; persists to config and
+    /// loads/unloads its runtime accordingly.
+    pub fn set_enabled(&mut self, file_name: &str, enabled: bool) -> anyhow::Result<()> {
+        let mut config = Config::load();
+        config.plugins.insert(file_name.to_string(), enabled);
+        config.save()?;
+
+        let Some(plugin) = self.find_by_file_mut(file_name) else {
+            return Ok(());
+        };
+        plugin.enabled = enabled;
+        if enabled && plugin.lua.is_none() {
+            let dir = plugins_dir();
+            match Plugin::load(&dir.join(file_name)) {
+                Ok(mut loaded) => {
+                    loaded.enabled = true;
+                    *plugin = loaded;
+                }
+                Err(e) => {
+                    plugin.error = Some(format!("{e:#}"));
+                    return Err(e);
+                }
+            }
+        } else if !enabled {
+            plugin.unload();
+        }
+        Ok(())
     }
 }

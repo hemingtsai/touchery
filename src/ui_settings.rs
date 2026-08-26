@@ -2,6 +2,7 @@ use crate::config::{Config, HotkeyConfig};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::switch::Switch;
 
 /// Keys that are pure modifier presses and cannot form a hotkey by themselves.
 const MODIFIER_KEYS: &[&str] = &[
@@ -13,6 +14,15 @@ pub struct SettingsView {
     hotkey: HotkeyConfig,
     recording: bool,
     saved_at: Option<String>,
+}
+
+/// Snapshot row of a plugin for rendering.
+struct PluginRowView {
+    file_name: String,
+    name: String,
+    enabled: bool,
+    loaded: bool,
+    error: Option<String>,
 }
 
 impl SettingsView {
@@ -106,13 +116,91 @@ impl SettingsView {
         self.recording = false;
         cx.notify();
     }
+
+    fn snapshot_plugins(&self, cx: &App) -> Vec<PluginRowView> {
+        let manager = crate::plugin_manager(cx);
+        let manager = manager.lock().unwrap();
+        manager
+            .plugins
+            .iter()
+            .map(|p| PluginRowView {
+                file_name: p.file_name.clone(),
+                name: p.name.clone(),
+                enabled: p.enabled,
+                loaded: p.available(),
+                error: p.error.clone(),
+            })
+            .collect()
+    }
+
+    fn render_plugin_row(&self, plugin: &PluginRowView, cx: &Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        let file_name = plugin.file_name.clone();
+
+        let status_text = if let Some(err) = &plugin.error {
+            format!("出错: {err}")
+        } else if !plugin.loaded {
+            "未加载".to_string()
+        } else if plugin.enabled {
+            "运行中".to_string()
+        } else {
+            "已停用".to_string()
+        };
+        let status_color = if plugin.error.is_some() {
+            gpui::rgba(0xff6b6b_ff)
+        } else if plugin.enabled && plugin.loaded {
+            gpui::rgba(0x7ee787_ff)
+        } else {
+            gpui::rgba(0xffffff_66)
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .py_2()
+            .px_3()
+            .rounded_md()
+            .bg(gpui::rgba(0xffffff08))
+            .child(
+                div().flex().flex_col().gap_y_0p5().child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(gpui::white())
+                        .child(plugin.name.clone()),
+                ),
+            )
+            .child(
+                div().flex().items_center().gap_3().child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(status_color)
+                        .child(status_text),
+                ),
+            )
+            .child(
+                Switch::new(SharedString::from(format!("plugin-toggle-{file_name}")))
+                    .checked(plugin.enabled)
+                    .on_click(move |checked: &bool, _window, cx| {
+                        let pm = crate::plugin_manager(cx);
+                        let result = pm.lock().unwrap().set_enabled(&file_name, *checked);
+                        entity.update(cx, |_, cx| {
+                            if let Err(e) = result {
+                                eprintln!("[plugin] toggle failed: {e:#}");
+                            }
+                            cx.notify();
+                        });
+                    }),
+            )
+    }
 }
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let hotkey_display = crate::hotkey::format_hotkey(&self.hotkey);
+        let plugins = self.snapshot_plugins(cx);
 
-        div()
+        let mut root = div()
             .id("settings-root")
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
@@ -121,60 +209,97 @@ impl Render for SettingsView {
             .flex()
             .flex_col()
             .gap_4()
+            .overflow_y_scroll();
+
+        // ---- header ----
+        root = root.child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child("控制面板"),
+        );
+
+        // ---- hotkey section ----
+        root = root.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(gpui::rgba(0xffffff_cc))
+                        .child("启动器快捷键"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(gpui::rgba(0xffffff14))
+                                .border_1()
+                                .border_color(gpui::rgba(0xffffff26))
+                                .text_size(px(13.0))
+                                .text_color(gpui::white())
+                                .child(hotkey_display),
+                        )
+                        .child(
+                            Button::new("record")
+                                .label(if self.recording {
+                                    "按下新快捷键… (Esc 取消)"
+                                } else {
+                                    "修改快捷键"
+                                })
+                                .when(self.recording, |b| b.primary())
+                                .on_click(cx.listener(Self::start_recording)),
+                        ),
+                )
+                .children(self.saved_at.clone().map(|msg| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(gpui::rgba(0x8ab4f8_ff))
+                        .child(msg)
+                })),
+        );
+
+        // ---- plugins section ----
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(gpui::white())
-                    .child("控制面板"),
-            )
-            // ---- hotkey section ----
-            .child(
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(gpui::rgba(0xffffff_cc))
+                    .child(format!(
+                        "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
+                        plugins.len()
+                    )),
+            );
+
+        if plugins.is_empty() {
+            section = section.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(gpui::rgba(0xffffff_cc))
-                            .child("启动器快捷键"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(gpui::rgba(0xffffff14))
-                                    .border_1()
-                                    .border_color(gpui::rgba(0xffffff26))
-                                    .text_size(px(13.0))
-                                    .text_color(gpui::white())
-                                    .child(hotkey_display),
-                            )
-                            .child(
-                                Button::new("record")
-                                    .label(if self.recording {
-                                        "按下新快捷键… (Esc 取消)"
-                                    } else {
-                                        "修改快捷键"
-                                    })
-                                    .when(self.recording, |b| b.primary())
-                                    .on_click(cx.listener(Self::start_recording)),
-                            ),
-                    )
-                    .children(self.saved_at.clone().map(|msg| {
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(gpui::rgba(0x8ab4f8_ff))
-                            .child(msg)
-                    })),
-            )
+                    .py_3()
+                    .text_size(px(12.0))
+                    .text_color(gpui::rgba(0xffffff_55))
+                    .child("暂无插件，将 .lua 文件放入上述目录后重启应用"),
+            );
+        } else {
+            for p in &plugins {
+                section = section.child(self.render_plugin_row(p, cx));
+            }
+        }
+        root = root.child(section);
+
+        root
     }
 }
