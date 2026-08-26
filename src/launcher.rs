@@ -203,6 +203,42 @@ impl LauncherView {
             },
         );
 
+        // Periodically check for app updates and refresh the list.
+        let list_clone = list.clone();
+        let window_handle = window.window_handle();
+        let _update_subscription = cx.spawn_in(window, async move |_launcher, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+
+            let _ = window_handle.update(cx, |_view, _window, cx| {
+                if crate::check_apps_updated(cx) {
+                    // Refresh the apps list
+                    let mut all_apps = crate::app_index(cx);
+                    let apps_only = crate::config::Config::load().apps_only;
+                    if apps_only {
+                        all_apps.retain(|app| app.in_app_dir);
+                    }
+                    let all_apps = Arc::new(all_apps);
+
+                    let _ = list_clone.update(cx, |state, cx| {
+                        let delegate = state.delegate_mut();
+                        let query = delegate.last_query.clone();
+                        delegate.apps = all_apps;
+                        delegate.apply_query(&query);
+                        let count = delegate.total_count();
+                        state.set_selected_index(
+                            (count > 0).then(|| IndexPath::new(0)),
+                            _window,
+                            cx,
+                        );
+                        state.scroll_to_selected_item(_window, cx);
+                        cx.notify();
+                    });
+                }
+            });
+        });
+
         Self {
             query_input,
             list,
