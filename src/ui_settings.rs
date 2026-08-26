@@ -163,10 +163,11 @@ impl SettingsView {
             .id(SharedString::from(format!("theme-row-{id}")))
             .flex()
             .items_center()
-            .justify_between()
+            .gap_3()
             .py_2()
             .px_3()
             .rounded_md()
+            .overflow_hidden()
             .bg(if is_active { pal.row_bg } else { gpui::transparent_black() })
             .border_1()
             .border_color(if is_active { pal.accent_info } else { pal.input_border })
@@ -174,11 +175,30 @@ impl SettingsView {
             .cursor_pointer()
             .child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(if is_active { pal.text_primary } else { pal.text_secondary })
-                    .child(label.to_string()),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(if is_active {
+                                pal.text_primary
+                            } else {
+                                pal.text_secondary
+                            })
+                            .child(label.to_string()),
+                    ),
             )
-            .child(div().text_size(px(11.0)).text_color(pal.accent_info).child(if is_active { "当前" } else { "" }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .whitespace_nowrap()
+                    .text_color(pal.accent_info)
+                    .child(if is_active { "当前" } else { "" }),
+            )
             .on_click(move |_, _, cx| {
                 let result = themes::set_active(cx, stem.clone());
                 entity.update(cx, |_, cx| {
@@ -235,26 +255,35 @@ impl SettingsView {
         div()
             .flex()
             .items_center()
-            .justify_between()
+            .gap_3()
             .py_2()
             .px_3()
             .rounded_md()
             .bg(pal.row_bg)
+            .overflow_hidden()
             .child(
-                div().flex().flex_col().gap_y_0p5().child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(gpui::white())
-                        .child(plugin.name.clone()),
-                ),
+                // Name column: flex_1 so it shrinks instead of pushing the
+                // status/switch out of the row.
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_primary)
+                            .child(plugin.name.clone()),
+                    ),
             )
             .child(
-                div().flex().items_center().gap_3().child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(status_color)
-                        .child(status_text),
-                ),
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .whitespace_nowrap()
+                    .text_color(status_color)
+                    .child(status_text),
             )
             .child(
                 Switch::new(SharedString::from(format!("plugin-toggle-{file_name}")))
@@ -282,6 +311,7 @@ impl Render for SettingsView {
         let mut root = div()
             .id("settings-root")
             .size_full()
+            .w_full()
             .bg(pal.panel_bg)
             .p_6()
             .flex()
@@ -289,26 +319,38 @@ impl Render for SettingsView {
             .gap_4()
             .overflow_y_scroll();
 
+        // Section titles can contain long paths; keep them on one line and
+        // ellipsize instead of stretching the column.
+        let title = |text: String| {
+            div()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .whitespace_nowrap()
+                        .truncate()
+                        .text_color(pal.text_secondary)
+                        .child(text),
+                )
+        };
+
         // ---- hotkey section ----
         root = root.child(
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(pal.text_secondary)
-                        .child("启动器快捷键"),
-                )
+                .child(title("启动器快捷键".to_string()))
                 .child(
                     div()
                         .flex()
                         .items_center()
+                        .flex_wrap()
                         .gap_3()
                         .child(
                             div()
+                                .flex_shrink_0()
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
@@ -353,15 +395,9 @@ impl Render for SettingsView {
             .clone();
         let user_themes = cx.global::<crate::themes::ThemeState>().user_themes.clone();
 
-        let mut theme_section = div().flex().flex_col().gap_2().child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.text_secondary)
-                .child(format!(
-                    "主题 — 目录: ~/Library/Application Support/touchery/themes"
-                )),
-        );
+        let mut theme_section = div().flex().flex_col().gap_2().child(title(
+            "主题 — 目录: ~/Library/Application Support/touchery/themes".to_string(),
+        ));
 
         // Built-in option (stem = None).
         theme_section = theme_section.child(self.render_theme_row(
@@ -392,28 +428,40 @@ impl Render for SettingsView {
             div()
                 .flex()
                 .items_center()
-                .justify_between()
+                .gap_3()
                 .py_2()
                 .px_3()
                 .rounded_md()
+                .overflow_hidden()
                 .bg(pal.row_bg)
                 .child(
-                    div().flex().flex_col().gap_y_0p5()
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap_y_0p5()
+                        .overflow_hidden()
                         .child(
                             div()
                                 .text_size(px(13.0))
+                                .whitespace_nowrap()
+                                .truncate()
                                 .text_color(pal.text_primary)
                                 .child("仅搜索应用程序"),
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
+                                .whitespace_nowrap()
+                                .truncate()
                                 .text_color(pal.text_secondary)
                                 .child("只在 Application 文件夹内索引，支持 路径/模糊 搜索（如 shiyong/cipan）；下次唤起生效"),
                         ),
                 )
                 .child(
                     Switch::new("apps-only-toggle")
+                        .flex_shrink_0()
                         .checked(apps_only)
                         .on_click(move |checked: &bool, _window, cx| {
                             let mut config = crate::config::Config::load();
@@ -430,16 +478,10 @@ impl Render for SettingsView {
         );
 
         // ---- plugins section ----
-        let mut section = div().flex().flex_col().gap_2().child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.text_secondary)
-                .child(format!(
-                    "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
-                    plugins.len()
-                )),
-        );
+        let mut section = div().flex().flex_col().gap_2().child(title(format!(
+            "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
+            plugins.len()
+        )));
 
         if plugins.is_empty() {
             section = section.child(
