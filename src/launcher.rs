@@ -452,7 +452,7 @@ impl Render for LauncherView {
                 root = root.flex().flex_col().child(
                     div()
                         .px_5()
-                        .pt_4()
+                        .py_4()
                         .flex()
                         .flex_col()
                         .gap_2()

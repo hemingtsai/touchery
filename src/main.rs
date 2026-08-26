@@ -230,7 +230,11 @@ fn toggle_launcher(cx: &mut App) {
             |window, cx| {
                 let launcher = cx.new(|cx| launcher::LauncherView::new(window, cx));
                 launcher.update(cx, |v, cx| v.focus_query(window, cx));
-                cx.new(|cx| Root::new(launcher, window, cx))
+                // No Root wrapper: Root paints an opaque theme background over
+                // the whole window, which would show around the shrunken
+                // secondary-input card. The launcher needs none of Root's
+                // dialog/notification layers.
+                launcher
             },
         )
         .expect("Failed to open launcher window");
