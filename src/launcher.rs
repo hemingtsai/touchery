@@ -320,7 +320,16 @@ impl LauncherView {
 
         match row {
             Row::App(app_idx) => {
-                let path = crate::app_index(cx)[app_idx].path.clone();
+                let Some(path) = self
+                    .list
+                    .read(cx)
+                    .delegate()
+                    .apps
+                    .get(app_idx)
+                    .map(|e| e.path.clone())
+                else {
+                    return;
+                };
                 std::thread::spawn(move || {
                     if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
                         eprintln!("[launcher] failed to open {path}: {e}");
