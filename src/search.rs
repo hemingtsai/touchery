@@ -43,11 +43,19 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
     }
 }
 
+/// Best fuzzy score across a candidate string list.
+fn best_fuzzy(query: &str, candidates: &[String]) -> Option<i64> {
+    candidates
+        .iter()
+        .filter_map(|c| fuzzy_score(query, c))
+        .max()
+}
+
 /// Best fuzzy score of `seg` against one path component's name/pinyin fields.
 fn match_component(seg: &str, c: &PathComponent) -> Option<i64> {
-    fuzzy_score(seg, &c.name_lower)
-        .or_else(|| fuzzy_score(seg, &c.pinyin_full))
-        .or_else(|| fuzzy_score(seg, &c.pinyin_initials))
+    best_fuzzy(seg, std::slice::from_ref(&c.name_lower))
+        .or_else(|| best_fuzzy(seg, &c.pinyins))
+        .or_else(|| best_fuzzy(seg, &c.initials))
 }
 
 /// Slash-separated hierarchical matching: each query segment must match a
@@ -97,11 +105,12 @@ pub fn search_apps<'a>(query: &str, apps: &'a [AppEntry]) -> Vec<(usize, i64)> {
             if let Some(score) = fuzzy_score(q_lower, &app.display_name_lower) {
                 return Some((i, score + 1200));
             }
-            // Pinyin of the localized display name (微信 → weixin / wx).
-            if let Some(score) = fuzzy_score(q_lower, &app.pinyin_full) {
+            // Pinyin variants of the localized display name
+            // (polyphonic-aware: 音乐 -> yinle / yinyue).
+            if let Some(score) = best_fuzzy(q_lower, &app.pinyins) {
                 return Some((i, score + 200));
             }
-            if let Some(score) = fuzzy_score(q_lower, &app.pinyin_initials) {
+            if let Some(score) = best_fuzzy(q_lower, &app.initials) {
                 return Some((i, score - 200));
             }
             // 2) Original bundle stem as fallback (WeChat).
@@ -145,6 +154,28 @@ mod tests {
         assert!(match_hierarchical(&["cipan", "shiyong"], &components).is_none());
         // Missing second segment fails.
         assert!(match_hierarchical(&["shiyong", "nomatch"], &components).is_none());
+    }
+
+    #[test]
+    fn polyphonic_pinyin_variants() {
+        // 音乐: 乐 is polyphonic (le/yue) — "yinyue" must match.
+        let (fulls, initials) = crate::apps::pinyin_variants("音乐");
+        assert!(fulls.iter().any(|f| f == "yinyue"), "fulls: {fulls:?}");
+        assert!(initials.iter().any(|i| i == "yy"), "initials: {initials:?}");
+
+        let mut app = crate::apps::AppEntry::new("Music".into(), "/System/Applications/Music.app".into());
+        app.display_name_lower = "音乐".into();
+        let (pys, inits) = crate::apps::pinyin_variants("音乐");
+        app.pinyins = pys;
+        app.initials = inits;
+        let apps = vec![app];
+
+        for q in ["yinyue", "yy", "yinle"] {
+            let hits = search_apps(q, &apps);
+            assert_eq!(hits.len(), 1, "query {q} should hit 音乐");
+        }
+        // Non-matching query stays empty.
+        assert!(search_apps("zzzz", &apps).is_empty());
     }
 
     #[test]

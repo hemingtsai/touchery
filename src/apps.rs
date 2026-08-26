@@ -1,32 +1,80 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use pinyin::ToPinyin;
+use pinyin::{ToPinyin, ToPinyinMulti};
 
 /// One searchable segment of an app's location: either a localized ancestor
 /// folder ("实用工具") or the app itself (last element).
 #[derive(Debug, Clone)]
 pub struct PathComponent {
     pub name_lower: String,
-    pub pinyin_full: String,
-    pub pinyin_initials: String,
+    /// All full-pinyin variants (polyphonic chars produce multiple).
+    pub pinyins: Vec<String>,
+    /// All initial-letter variants (e.g. 音乐 -> ["yl", "yy"]).
+    pub initials: Vec<String>,
 }
 
 impl PathComponent {
     pub(crate) fn new(name: String) -> Self {
         let name_lower = name.to_lowercase();
-        let pinyin_vec: Vec<&str> = name
-            .as_str()
-            .to_pinyin()
-            .flatten()
-            .map(|p| p.plain())
-            .collect();
+        let (pinyins, initials) = pinyin_variants(&name);
         Self {
             name_lower,
-            pinyin_full: pinyin_vec.join(""),
-            pinyin_initials: pinyin_vec.iter().filter_map(|s| s.chars().next()).collect(),
+            pinyins,
+            initials,
         }
     }
+}
+
+/// Max number of cartesian-product pinyin variants per string. App names are
+/// short; polyphonic characters multiply candidates but stay far below this.
+const MAX_PINYIN_VARIANTS: usize = 64;
+
+/// Generate all full-pinyin and initial-letter combinations for `name`,
+/// treating every polyphonic character's pronunciations as alternatives.
+/// e.g. 音乐 -> (["yinle", "yinyue"], ["yl", "yy"]).
+pub(crate) fn pinyin_variants(name: &str) -> (Vec<String>, Vec<String>) {
+    fn product(lists: Vec<Vec<String>>) -> Vec<String> {
+        let mut acc: Vec<String> = vec![String::new()];
+        for list in lists {
+            if list.is_empty() {
+                continue; // character contributes nothing (non-Han)
+            }
+            let mut next = Vec::with_capacity(acc.len() * list.len());
+            for prefix in &acc {
+                for item in &list {
+                    next.push(format!("{prefix}{item}"));
+                }
+            }
+            if next.len() > MAX_PINYIN_VARIANTS {
+                next.truncate(MAX_PINYIN_VARIANTS);
+            }
+            acc = next;
+        }
+        acc
+    }
+
+    let mut full_lists: Vec<Vec<String>> = Vec::new();
+    let mut initial_lists: Vec<Vec<String>> = Vec::new();
+
+    for multi in name.to_pinyin_multi() {
+        let Some(multi) = multi else {
+            continue; // non-Han character: dropped, matching old behavior
+        };
+        let mut fulls = Vec::new();
+        let mut inits = Vec::new();
+        for py in multi {
+            let plain = py.plain();
+            fulls.push(plain.to_string());
+            if let Some(c) = plain.chars().next() {
+                inits.push(c.to_string());
+            }
+        }
+        full_lists.push(fulls);
+        initial_lists.push(inits);
+    }
+
+    (product(full_lists), product(initial_lists))
 }
 
 #[derive(Debug, Clone)]
@@ -38,9 +86,10 @@ pub struct AppEntry {
     pub path: String,
     pub display_name_lower: String,
     pub name_lower: String,
-    /// Pinyin derived from the localized display name.
-    pub pinyin_full: String,
-    pub pinyin_initials: String,
+    /// Pinyin variants derived from the localized display name
+    /// (polyphonic-aware: 音乐 -> ["yinle", "yinyue"]).
+    pub pinyins: Vec<String>,
+    pub initials: Vec<String>,
     /// Localized hierarchy from the nearest Applications root down to the
     /// app itself, e.g. ["实用工具", "磁盘工具"]. Empty when the app sits
     /// directly inside a root.
@@ -65,15 +114,7 @@ impl AppEntry {
         let display_name_lower = display_name.to_lowercase();
         let name_lower = name.to_lowercase();
 
-        let pinyin_vec: Vec<&str> = display_name
-            .as_str()
-            .to_pinyin()
-            .flatten()
-            .map(|p| p.plain())
-            .collect();
-        let pinyin_full: String = pinyin_vec.join("");
-        let pinyin_initials: String =
-            pinyin_vec.iter().filter_map(|s| s.chars().next()).collect();
+        let (pinyins, initials) = pinyin_variants(&display_name);
 
         let (path_components, in_app_dir) = build_path_components(&path, &display_name);
 
@@ -83,8 +124,8 @@ impl AppEntry {
             path,
             display_name_lower,
             name_lower,
-            pinyin_full,
-            pinyin_initials,
+            pinyins,
+            initials,
             path_components,
             in_app_dir,
         }
