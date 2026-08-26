@@ -168,21 +168,37 @@ pub fn open_settings(cx: &mut App) {
         .borrow()
         .clone();
     if let Some(handle) = existing {
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
-        return;
+        let activated = handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok();
+        if activated {
+            return;
+        }
+        // Stale handle: the window was closed natively (traffic light).
+        // Clear it and fall through to open a fresh one.
+        cx.global::<LauncherWindowState>()
+            .settings_window
+            .borrow_mut()
+            .take();
     }
 
     let handle = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(0.), px(0.)),
+                    point(px(60.), px(60.)),
                     ui_theme::settings_size(),
                 ))),
-                titlebar: None,
-                kind: WindowKind::Floating,
-                is_resizable: false,
-                is_minimizable: false,
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Touchery 设置".into()),
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                kind: WindowKind::Normal,
+                is_resizable: true,
+                is_minimizable: true,
+                window_min_size: Some(ui_theme::settings_size()),
+                focus: true,
                 ..Default::default()
             },
             |window, cx| {
@@ -224,8 +240,13 @@ fn toggle_launcher(cx: &mut App) {
         .borrow_mut()
         .take();
     if let Some(handle) = existing {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-        return;
+        if handle
+            .update(cx, |_, window, _| window.remove_window())
+            .is_ok()
+        {
+            return;
+        }
+        // Stale handle — fall through and open a fresh window.
     }
 
     let (bounds, display_id) = compute_spotlight_bounds(cx);

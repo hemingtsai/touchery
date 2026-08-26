@@ -289,28 +289,6 @@ impl Render for SettingsView {
             .gap_4()
             .overflow_y_scroll();
 
-        // ---- header ----
-        root = root.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(16.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(gpui::white())
-                        .child("控制面板"),
-                )
-                .child(
-                    Button::new("close-settings")
-                        .label("关闭 (Esc)")
-                        .on_click(|_, window, cx| {
-                            crate::dismiss_settings(window, cx);
-                        }),
-                ),
-        );
-
         // ---- hotkey section ----
         root = root.child(
             div()
