@@ -2,6 +2,8 @@ mod apps;
 mod hotkey;
 mod launcher;
 mod search;
+mod tray;
+mod ui_settings;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -12,6 +14,8 @@ use std::sync::RwLock;
 
 struct LauncherWindowState {
     launcher_window: RefCell<Option<AnyWindowHandle>>,
+    settings_window: RefCell<Option<AnyWindowHandle>>,
+    _tray: RefCell<Option<tray_icon::TrayIcon>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
 }
 
@@ -38,8 +42,20 @@ fn main() {
 
         let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
 
+        // Menu bar tray icon (lightning bolt). Must stay alive for the whole
+        // process lifetime.
+        let tray = match tray::setup_tray() {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                eprintln!("Failed to setup tray icon: {e}");
+                None
+            }
+        };
+
         cx.set_global(LauncherWindowState {
             launcher_window: RefCell::new(None),
+            settings_window: RefCell::new(None),
+            _tray: RefCell::new(tray),
             apps_index: apps_index.clone(),
         });
 
@@ -65,6 +81,14 @@ fn main() {
                 .timer(std::time::Duration::from_millis(50))
                 .await;
 
+            if let Some(menu_id) = tray::poll_menu_event() {
+                let _ = cx.update(|cx| match menu_id.as_str() {
+                    tray::MENU_QUIT => cx.quit(),
+                    tray::MENU_OPEN_PANEL => open_settings(cx),
+                    _ => {}
+                });
+            }
+
             while let Ok(event) = receiver.try_recv() {
                 if event.state != global_hotkey::HotKeyState::Pressed {
                     continue;
@@ -78,6 +102,55 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// Open the control panel window, or activate it if already open.
+pub fn open_settings(cx: &mut App) {
+    let existing = cx
+        .global::<LauncherWindowState>()
+        .settings_window
+        .borrow()
+        .clone();
+    if let Some(handle) = existing {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        return;
+    }
+
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(px(420.), px(320.)),
+                ))),
+                titlebar: None,
+                kind: WindowKind::Floating,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                let view = cx.new(|cx| ui_settings::SettingsView::new(window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .expect("Failed to open settings window");
+
+    cx.global::<LauncherWindowState>()
+        .settings_window
+        .borrow_mut()
+        .replace(handle.into());
+}
+
+pub fn close_settings(cx: &mut App) {
+    let existing = cx
+        .global::<LauncherWindowState>()
+        .settings_window
+        .borrow_mut()
+        .take();
+    if let Some(handle) = existing {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
 }
 
 fn toggle_launcher(cx: &mut App) {

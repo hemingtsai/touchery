@@ -10,6 +10,7 @@ global-hotkey = "0.8"
 pinyin = "0.10"
 objc = "0.2"
 anyhow = "1"
+tray-icon = "0.21"
 
 [profile.release]
 lto = "fat"
