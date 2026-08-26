@@ -40,8 +40,11 @@ struct LauncherWindowState {
     launcher_window: RefCell<Option<AnyWindowHandle>>,
     settings_window: RefCell<Option<AnyWindowHandle>>,
     _tray: RefCell<Option<tray_icon::TrayIcon>>,
-    /// Dropping the old manager unregisters its hotkeys.
+    /// Single manager reused for the whole process lifetime. Creating a new
+    /// one per re-registration fails (InstallEventHandler), so we only
+    /// unregister/register individual keys on it.
     hotkey_manager: RefCell<Option<global_hotkey::GlobalHotKeyManager>>,
+    current_hotkey: RefCell<Option<global_hotkey::hotkey::HotKey>>,
     hotkey_id: Arc<RwLock<u32>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
@@ -87,6 +90,7 @@ fn main() {
             settings_window: RefCell::new(None),
             _tray: RefCell::new(tray),
             hotkey_manager: RefCell::new(Some(hotkey_state.manager)),
+            current_hotkey: RefCell::new(Some(initial_hotkey)),
             hotkey_id: hotkey_id.clone(),
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
@@ -267,14 +271,38 @@ pub fn plugin_manager(cx: &App) -> Arc<std::sync::Mutex<plugins::PluginManager>>
         .clone()
 }
 
-/// Re-register the global hotkey: drops the old manager (unregistering the old
-/// key) and installs a new one.
+/// Re-register the global hotkey. Reuses the single manager for the whole
+/// process lifetime: unregisters the previous combo first, then registers
+/// the new one. Creating a fresh `GlobalHotKeyManager` per change fails on
+/// macOS (InstallEventHandler), which surfaced as bogus errno messages.
 pub fn apply_hotkey(cx: &mut App, hk: global_hotkey::hotkey::HotKey) -> anyhow::Result<()> {
-    let state = hotkey::HotkeyState::register(hk)?;
     let global = cx.global::<LauncherWindowState>();
-    *global.hotkey_id.write().unwrap() = state.id;
-    *global.hotkey_manager.borrow_mut() = Some(state.manager);
+    let previous = global.current_hotkey.borrow_mut().take();
+
+    let mut slot = global.hotkey_manager.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(global_hotkey::GlobalHotKeyManager::new()?);
+    }
+    let manager = slot.as_ref().unwrap();
+
+    // Unregister before registering so re-picking the same combo also works.
+    if let Some(old) = previous {
+        let _ = manager.unregister(old);
+    }
+    manager.register(hk)?;
+
+    *global.hotkey_id.write().unwrap() = hk.id();
+    drop(slot);
+    *global.current_hotkey.borrow_mut() = Some(hk);
     Ok(())
+}
+
+/// Best-effort re-registration of the configured hotkey; used when a new
+/// registration fails mid-swap (old combo was already unregistered).
+pub fn reregister_current(cx: &mut App) -> anyhow::Result<()> {
+    let hk = hotkey::hotkey_from_config(&config::Config::load().hotkey)
+        .unwrap_or_else(|_| hotkey::default_hotkey());
+    apply_hotkey(cx, hk)
 }
 
 fn set_accessory_policy() {

@@ -125,7 +125,12 @@ impl SettingsView {
                         Err(e) => self.saved_at = Some(format!("保存失败: {e}")),
                     }
                 }
-                Err(e) => self.saved_at = Some(format!("注册失败: {e}")),
+                Err(e) => {
+                    self.saved_at = Some(format!("注册失败: {e}，可能被其他应用占用"));
+                    // Restore tracking of the previous combo since we may have
+                    // unregistered it before the failed register.
+                    let _ = crate::reregister_current(cx);
+                }
             },
             Err(e) => self.saved_at = Some(format!("无效快捷键: {e}")),
         }
