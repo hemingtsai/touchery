@@ -6634,6 +6634,7 @@ dependencies = [
  "global-hotkey",
  "gpui",
  "gpui-component",
+ "image",
  "mlua",
  "objc",
  "pinyin",
