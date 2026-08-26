@@ -218,7 +218,7 @@ fn toggle_launcher(cx: &mut App) {
         return;
     }
 
-    let bounds = compute_spotlight_bounds(cx);
+    let (bounds, display_id) = compute_spotlight_bounds(cx);
     let handle = cx
         .open_window(
             WindowOptions {
@@ -230,6 +230,7 @@ fn toggle_launcher(cx: &mut App) {
                 is_resizable: false,
                 is_minimizable: false,
                 window_background: WindowBackgroundAppearance::Transparent,
+                display_id,
                 ..Default::default()
             },
             |window, cx| {
@@ -363,12 +364,66 @@ fn disable_key_window_shadow() {
     }
 }
 
-fn compute_spotlight_bounds(cx: &App) -> Bounds<Pixels> {
-    let display = cx.primary_display().unwrap();
-    let db = display.bounds();
+/// Global mouse position in AppKit coordinates (origin at the bottom-left of
+/// the primary screen, y up).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+
+unsafe impl objc::Encode for NSPoint {
+    fn encode() -> objc::Encoding {
+        // Objective-C type encoding for CGPoint { double x; double y; }.
+        unsafe { objc::Encoding::from_str("{CGPoint=dd}") }
+    }
+}
+
+fn mouse_location() -> Option<NSPoint> {
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        Some(point)
+    }
+}
+
+/// Compute the launcher window bounds on the display currently under the
+/// mouse cursor: horizontally centered, top edge fixed at 30% of the screen
+/// height. Returns the bounds plus that display's id.
+fn compute_spotlight_bounds(cx: &App) -> (Bounds<Pixels>, Option<DisplayId>) {
+    let displays = cx.displays();
     let w = px(680.0);
     let h = px(440.0);
+
+    let mut target = cx.primary_display();
+    if let Some(point) = mouse_location() {
+        // Convert from AppKit coords (y up, primary bottom-left) to gpui's
+        // global top-left-origin space using the primary screen height.
+        if let Some(primary) = cx.primary_display() {
+            let primary_h = primary.bounds().size.height.to_f64();
+            let mx = point.x;
+            let my_top_left = primary_h - point.y;
+
+            target = displays.into_iter().find(|display| {
+                let b = display.bounds();
+                mx >= b.origin.x.to_f64()
+                    && mx < b.origin.x.to_f64() + b.size.width.to_f64()
+                    && my_top_left >= b.origin.y.to_f64()
+                    && my_top_left < b.origin.y.to_f64() + b.size.height.to_f64()
+            });
+        }
+    }
+
+    let Some(display) = target else {
+        return (
+            Bounds::new(point(px(100.), px(100.)), size(w, h)),
+            None,
+        );
+    };
+
+    let db = display.bounds();
     let x = db.origin.x + (db.size.width - w) / 2.0;
-    let y = db.origin.y + db.size.height * 0.22 - h / 2.0;
-    Bounds::new(Point::new(x, y), Size::new(w, h))
+    let y = db.origin.y + db.size.height * 0.30;
+    (Bounds::new(Point::new(x, y), Size::new(w, h)), Some(display.id()))
 }
