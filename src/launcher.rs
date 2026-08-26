@@ -91,7 +91,7 @@ impl ListDelegate for LauncherDelegate {
         _cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
         let text = match self.row_at(ix.row)? {
-            Row::App(app_idx) => self.apps[*app_idx].name.clone(),
+            Row::App(app_idx) => self.apps[*app_idx].display_name.clone(),
             Row::Plugin { plugin_name, item } => format!("{}:{}", plugin_name, item.title),
         };
         Some(ListItem::new(ix).child(
