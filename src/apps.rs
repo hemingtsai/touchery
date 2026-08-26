@@ -237,6 +237,26 @@ fn localized_display_name(path: &str) -> Option<String> {
 
 const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
 
+/// Add a single app to the index if it's a valid .app bundle.
+pub fn add_app_to_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
+    if let Some(entry) = make_entry(path.to_string(), None) {
+        // Check for duplicates
+        let is_dup = apps.iter().any(|e| e.path == entry.path || e.display_name_lower == entry.display_name_lower);
+        if !is_dup {
+            apps.push(entry);
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove an app from the index by path.
+pub fn remove_app_from_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
+    let len_before = apps.len();
+    apps.retain(|e| e.path != path);
+    apps.len() < len_before
+}
+
 /// Parse one line of `mdfind -attr kMDItemDisplayName` output:
 /// `<path>   kMDItemDisplayName = <localized name>`
 fn parse_attr_line(line: &str) -> Option<(String, Option<String>)> {
