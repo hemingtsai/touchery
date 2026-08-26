@@ -10,9 +10,31 @@ mod ui_settings;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::Root;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::RwLock;
+
+/// Embedded assets (icons etc.).
+struct Assets;
+
+static ASSET_FILES: &[(&str, &[u8])] = &[("icons/search.svg", include_bytes!("../assets/icons/search.svg"))];
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        Ok(ASSET_FILES
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
+    }
+
+    fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
+        Ok(ASSET_FILES
+            .iter()
+            .map(|(p, _)| SharedString::from(*p))
+            .collect())
+    }
+}
 
 struct LauncherWindowState {
     launcher_window: RefCell<Option<AnyWindowHandle>>,
@@ -28,7 +50,7 @@ struct LauncherWindowState {
 impl Global for LauncherWindowState {}
 
 fn main() {
-    Application::new().run(|cx| {
+    Application::new().with_assets(Assets).run(|cx| {
         gpui_component::init(cx);
 
         set_accessory_policy();
@@ -216,6 +238,18 @@ pub fn close_launcher(cx: &mut App) {
     if let Some(handle) = existing {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
+}
+
+/// Dismiss the launcher from *inside* the launcher window's own update cycle
+/// (event handlers / subscriptions). Calling `handle.update` on the same
+/// window we are already inside fails silently, so remove the window
+/// directly and just clear the stale handle.
+pub fn dismiss_launcher(window: &mut Window, cx: &mut App) {
+    cx.global::<LauncherWindowState>()
+        .launcher_window
+        .borrow_mut()
+        .take();
+    window.remove_window();
 }
 
 /// Snapshot of the application index (loaded once at startup).

@@ -1,12 +1,12 @@
 use crate::apps::AppEntry;
-use crate::plugins::{PluginItem, PluginManager};
+use crate::plugins::PluginItem;
 use crate::search::search_apps;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::{IndexPath, Sizable as _};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 actions!(launcher, [LauncherCancel]);
 
@@ -27,9 +27,11 @@ pub enum Mode {
 }
 
 pub struct LauncherView {
+    query_input: Entity<InputState>,
     list: Entity<ListState<LauncherDelegate>>,
     sub_input: Entity<InputState>,
     mode: Mode,
+    _query_subscription: Subscription,
     _list_subscription: Subscription,
     _sub_input_subscription: Subscription,
 }
@@ -40,7 +42,6 @@ pub struct LauncherDelegate {
     plugin_rows: Vec<Row>,
     last_query: String,
     search_generation: usize,
-    pm: Arc<Mutex<PluginManager>>,
 }
 
 impl LauncherDelegate {
@@ -53,6 +54,25 @@ impl LauncherDelegate {
             self.app_rows.get(row)
         } else {
             self.plugin_rows.get(row - self.app_rows.len())
+        }
+    }
+
+    /// Synchronously apply a query. Returns (generation, is_prefix_mode).
+    fn apply_query(&mut self, query: &str) -> (usize, bool) {
+        self.last_query = query.to_string();
+        if query.starts_with(PLUGIN_PREFIX) {
+            self.app_rows.clear();
+            self.plugin_rows.clear();
+            self.search_generation += 1;
+            (self.search_generation, true)
+        } else {
+            self.plugin_rows.clear();
+            self.search_generation += 1;
+            self.app_rows = search_apps(query, &self.apps)
+                .into_iter()
+                .map(|(i, _)| Row::App(i))
+                .collect();
+            (self.search_generation, false)
         }
     }
 }
@@ -95,65 +115,11 @@ impl ListDelegate for LauncherDelegate {
 
     fn perform_search(
         &mut self,
-        query: &str,
+        _query: &str,
         _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
+        _cx: &mut Context<ListState<Self>>,
     ) -> Task<()> {
-        self.last_query = query.to_string();
-
-        if let Some(rest) = query.strip_prefix(PLUGIN_PREFIX) {
-            // Prefix routing: hide apps, query all enabled plugins.
-            self.app_rows.clear();
-            self.plugin_rows.clear();
-            self.search_generation += 1;
-            let generation = self.search_generation;
-            let pm = self.pm.clone();
-            let rest = rest.trim().to_string();
-
-            cx.spawn(async move |list, cx| {
-                // Debounce fast typing before touching the plugins.
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(80))
-                    .await;
-
-                let results = cx.background_executor().spawn(async move {
-                    let mut manager = pm.lock().unwrap();
-                    let mut rows = Vec::new();
-                    for plugin in manager.plugins.iter_mut() {
-                        if !plugin.available() {
-                            continue;
-                        }
-                        for item in plugin.query(&rest) {
-                            rows.push(Row::Plugin {
-                                plugin_name: plugin.name.clone(),
-                                item,
-                            });
-                        }
-                    }
-                    rows
-                })
-                .await;
-
-                let _ = list.update(cx, |state, cx| {
-                    let delegate = state.delegate_mut();
-                    if delegate.search_generation != generation {
-                        return; // stale result
-                    }
-                    delegate.plugin_rows = results;
-                    cx.notify();
-                });
-            })
-            .detach();
-        } else {
-            // Local fuzzy search over apps; invalidate any pending plugin work.
-            self.plugin_rows.clear();
-            self.search_generation += 1;
-            self.app_rows = search_apps(query, &self.apps)
-                .into_iter()
-                .map(|(i, _)| Row::App(i))
-                .collect();
-        }
-
+        // Querying is driven by our own search input; nothing to do here.
         Task::ready(())
     }
 
@@ -179,85 +145,180 @@ impl LauncherView {
             plugin_rows: Vec::new(),
             last_query: String::new(),
             search_generation: 0,
-            pm: crate::plugin_manager(cx),
         };
 
-        let list = cx.new(|cx| {
-            ListState::new(delegate, window, cx)
-                .searchable(true)
-                .selectable(true)
-        });
+        let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
 
-        let sub_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回")
-        });
+        let query_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 > 调用插件…"));
 
-        let list_subscription = {
-            let apps = apps.clone();
-            cx.subscribe_in(
-                &list,
-                window,
-                move |launcher, _list, event, window, cx| match event {
-                    gpui_component::list::ListEvent::Confirm(ix) => {
-                        launcher.on_confirm(ix.row, &apps, window, cx);
-                    }
-                    gpui_component::list::ListEvent::Cancel => {
-                        crate::close_launcher(cx);
-                    }
-                    _ => {}
-                },
-            )
-        };
+        let sub_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回"));
 
-        let sub_input_subscription =
-            cx.subscribe_in(&sub_input, window, |launcher, input, event, window, cx| {
+        // Typing drives the filtering.
+        let query_subscription = cx.subscribe_in(
+            &query_input,
+            window,
+            |launcher, _input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    launcher.on_query_changed(window, cx);
+                } else if matches!(event, InputEvent::PressEnter { .. }) {
+                    launcher.confirm_selected(window, cx);
+                }
+            },
+        );
+
+        // Mouse clicks on rows.
+        let list_subscription = cx.subscribe_in(
+            &list,
+            window,
+            |launcher, _list, event, window, cx| match event {
+                gpui_component::list::ListEvent::Confirm(ix) => {
+                    launcher.confirm_row(ix.row, window, cx);
+                }
+                gpui_component::list::ListEvent::Cancel => {
+                    crate::dismiss_launcher(window, cx);
+                }
+                _ => {}
+            },
+        );
+
+        let sub_input_subscription = cx.subscribe_in(
+            &sub_input,
+            window,
+            |launcher, input, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     launcher.on_sub_input_confirm(input, window, cx);
                 }
-            });
+            },
+        );
 
         Self {
+            query_input,
             list,
             sub_input,
             mode: Mode::Normal,
+            _query_subscription: query_subscription,
             _list_subscription: list_subscription,
             _sub_input_subscription: sub_input_subscription,
         }
     }
 
     pub fn focus_query(&self, window: &mut Window, cx: &mut App) {
-        self.list.update(cx, |state, cx| state.focus(window, cx));
+        self.query_input.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    fn on_confirm(
-        &mut self,
-        row_ix: usize,
-        apps: &Arc<Vec<AppEntry>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(row) = self
-            .list
-            .read(cx)
-            .delegate()
-            .row_at(row_ix)
-            .cloned()
-        else {
+    fn on_query_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.query_input.read(cx).value().to_string();
+
+        let (generation, prefix_mode) = self.list.update(cx, |state, cx| {
+            let delegate = state.delegate_mut();
+            let (generation, prefix_mode) = delegate.apply_query(&query);
+            let count = delegate.total_count();
+            state.set_selected_index(
+                (count > 0).then(|| IndexPath::new(0)),
+                window,
+                cx,
+            );
+            state.scroll_to_selected_item(window, cx);
+            cx.notify();
+            (generation, prefix_mode)
+        });
+
+        if !prefix_mode {
+            return;
+        }
+
+        // Prefix routing: debounce, then query all enabled plugins in the
+        // background and merge results when they are still current.
+        let rest = query[PLUGIN_PREFIX.len()..].trim().to_string();
+        let pm = crate::plugin_manager(cx);
+        let list = self.list.clone();
+        let window_handle = window.window_handle();
+
+        cx.spawn(async move |_launcher, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+
+            let results = cx.background_executor().spawn(async move {
+                let mut manager = pm.lock().unwrap();
+                let mut rows = Vec::new();
+                for plugin in manager.plugins.iter_mut() {
+                    if !plugin.available() {
+                        continue;
+                    }
+                    for item in plugin.query(&rest) {
+                        rows.push(Row::Plugin {
+                            plugin_name: plugin.name.clone(),
+                            item,
+                        });
+                    }
+                }
+                rows
+            })
+            .await;
+
+            let _ = window_handle.update(cx, |_view, window, cx| {
+                let _ = list.update(cx, |state, cx| {
+                    let delegate = state.delegate_mut();
+                    if delegate.search_generation != generation {
+                        return; // stale result
+                    }
+                    delegate.plugin_rows = results;
+                    let count = delegate.total_count();
+                    state.set_selected_index((count > 0).then(|| IndexPath::new(0)), window, cx);
+                    state.scroll_to_selected_item(window, cx);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Move the list selection by ±1 with wrap-around (arrow keys).
+    fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.list.update(cx, |state, cx| {
+            let count = state.delegate().total_count();
+            if count == 0 {
+                return;
+            }
+            let next = match state.selected_index() {
+                None => 0,
+                Some(ix) => ((ix.row as isize + delta).rem_euclid(count as isize)) as usize,
+            };
+            state.set_selected_index(Some(IndexPath::new(next)), window, cx);
+            state.scroll_to_selected_item(window, cx);
+            cx.notify();
+        });
+    }
+
+    /// Enter pressed: confirm whatever row is selected.
+    fn confirm_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.list.read(cx).selected_index().map(|ix| ix.row);
+        let count = self.list.read(cx).delegate().total_count();
+        if count == 0 {
+            return;
+        }
+        self.confirm_row(selected.unwrap_or(0), window, cx);
+    }
+
+    fn confirm_row(&mut self, row_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.list.read(cx).delegate().row_at(row_ix).cloned() else {
             return;
         };
         let last_query = self.list.read(cx).delegate().last_query.clone();
 
         match row {
             Row::App(app_idx) => {
-                let path = apps[app_idx].path.clone();
+                let path = crate::app_index(cx)[app_idx].path.clone();
                 std::thread::spawn(move || {
                     let _ = std::process::Command::new("open").arg(&path).spawn();
                 });
-                crate::close_launcher(cx);
+                crate::dismiss_launcher(window, cx);
             }
             Row::Plugin { plugin_name, item } => {
                 if item.sub {
-                    // Enter secondary-input mode.
                     self.mode = Mode::SubInput {
                         plugin_name,
                         value: item.value,
@@ -265,8 +326,8 @@ impl LauncherView {
                     };
                     self.sub_input.update(cx, |state, cx| {
                         state.set_value("", window, cx);
+                        state.focus(window, cx);
                     });
-                    self.sub_input.update(cx, |state, cx| state.focus(window, cx));
                     cx.notify();
                 } else {
                     let pm = crate::plugin_manager(cx);
@@ -277,7 +338,7 @@ impl LauncherView {
                             plugin.run(&value, &last_query);
                         }
                     });
-                    crate::close_launcher(cx);
+                    crate::dismiss_launcher(window, cx);
                 }
             }
         }
@@ -286,7 +347,7 @@ impl LauncherView {
     fn on_sub_input_confirm(
         &mut self,
         input: &Entity<InputState>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Mode::SubInput {
@@ -304,7 +365,7 @@ impl LauncherView {
                 plugin.run_sub(&value, &sub_query);
             }
         });
-        crate::close_launcher(cx);
+        crate::dismiss_launcher(window, cx);
     }
 
     fn exit_sub_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -312,12 +373,8 @@ impl LauncherView {
         self.sub_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
-        self.focus_list(window, cx);
+        self.focus_query(window, cx);
         cx.notify();
-    }
-
-    fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.list.update(cx, |state, cx| state.focus(window, cx));
     }
 }
 
@@ -333,7 +390,24 @@ impl Render for LauncherView {
                 if matches!(launcher.mode, Mode::SubInput { .. }) {
                     launcher.exit_sub_mode(window, cx);
                 } else {
-                    crate::close_launcher(cx);
+                    crate::dismiss_launcher(window, cx);
+                }
+            }))
+            // Raw key listener: up/down reach us because the single-line
+            // input's MoveUp/MoveDown action bindings have no handler, so the
+            // keystroke falls through to key_down listeners along the dispatch
+            // path.
+            .on_key_down(cx.listener(|launcher, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        launcher.move_selection(-1, window, cx);
+                        cx.stop_propagation();
+                    }
+                    "down" => {
+                        launcher.move_selection(1, window, cx);
+                        cx.stop_propagation();
+                    }
+                    _ => {}
                 }
             }))
             .w(px(680.))
@@ -347,39 +421,46 @@ impl Render for LauncherView {
 
         match mode {
             Mode::Normal => {
-                root = root.child(
-                    List::new(&list)
-                        .w_full()
-                        .h_full()
-                        .search_placeholder("搜索应用，或输入 > 调用插件…"),
-                );
+                root = root
+                    .flex()
+                    .flex_col()
+                    // Search bar with leading icon.
+                    .child(
+                        div().p_3().pb_2().child(
+                            Input::new(&self.query_input)
+                                .w_full()
+                                .prefix(
+                                    svg()
+                                        .path("icons/search.svg")
+                                        .text_color(gpui::rgba(0xffffff_77))
+                                        .size_4(),
+                                )
+                                .large(),
+                        ),
+                    )
+                    // Results fill the rest of the card.
+                    .child(div().flex_1().min_h_0().child(List::new(&list).w_full().h_full()));
             }
             Mode::SubInput {
                 plugin_name,
                 title,
                 ..
             } => {
-                let sub_input = self.sub_input.clone();
-                root = root
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .px_5()
-                            .pt_4()
-                            .pb_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(12.0))
-                            .text_color(gpui::rgba(0xffffff_88))
-                            .child(format!("↳ {}:{} — 二级输入，Esc 返回", plugin_name, title)),
-                    )
-                    .child(
-                        div().flex_1().px_4().pb_4().child(
-                            Input::new(&sub_input).w_full().h_full().large(),
-                        ),
-                    );
+                root = root.flex().flex_col().child(
+                    div()
+                        .px_5()
+                        .pt_4()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .text_size(px(12.0))
+                        .text_color(gpui::rgba(0xffffff_88))
+                        .child(format!(
+                            "↳ {}:{} — 二级输入，Esc 返回",
+                            plugin_name, title
+                        ))
+                        .child(Input::new(&self.sub_input).w_full().large()),
+                );
             }
         }
 

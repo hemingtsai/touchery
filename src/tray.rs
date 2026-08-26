@@ -59,6 +59,8 @@ pub fn setup_tray() -> anyhow::Result<TrayIcon> {
         .with_menu(Box::new(menu))
         .with_tooltip("touchery")
         .with_icon(bolt_icon())
+        // Template image: macOS renders it adaptively for dark/light menu bars.
+        .with_icon_as_template(true)
         .with_menu_on_left_click(true)
         .build()?;
     Ok(tray)
