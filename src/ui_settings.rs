@@ -1,5 +1,5 @@
 use crate::config::{Config, HotkeyConfig};
-use crate::ui_theme::*;
+use crate::{themes, ui_theme::*};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -149,6 +149,47 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn render_theme_row(
+        &self,
+        id: &str,
+        label: &str,
+        is_active: bool,
+        pal: &themes::Palette,
+        stem: Option<String>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        div()
+            .id(SharedString::from(format!("theme-row-{id}")))
+            .flex()
+            .items_center()
+            .justify_between()
+            .py_2()
+            .px_3()
+            .rounded_md()
+            .bg(if is_active { pal.row_bg } else { gpui::transparent_black() })
+            .border_1()
+            .border_color(if is_active { pal.accent_info } else { pal.input_border })
+            .hover(|s| s.bg(pal.row_bg))
+            .cursor_pointer()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(if is_active { pal.text_primary } else { pal.text_secondary })
+                    .child(label.to_string()),
+            )
+            .child(div().text_size(px(11.0)).text_color(pal.accent_info).child(if is_active { "当前" } else { "" }))
+            .on_click(move |_, _, cx| {
+                let result = themes::set_active(cx, stem.clone());
+                entity.update(cx, |_, cx| {
+                    if let Err(e) = result {
+                        eprintln!("[theme] switch failed: {e:#}");
+                    }
+                    cx.notify();
+                });
+            })
+    }
+
     fn snapshot_plugins(&self, cx: &App) -> Vec<PluginRowView> {
         let manager = crate::plugin_manager(cx);
         let manager = manager.lock().unwrap();
@@ -165,7 +206,12 @@ impl SettingsView {
             .collect()
     }
 
-    fn render_plugin_row(&self, plugin: &PluginRowView, cx: &Context<Self>) -> impl IntoElement {
+    fn render_plugin_row(
+        &self,
+        plugin: &PluginRowView,
+        pal: &crate::themes::Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let entity = cx.entity();
         let file_name = plugin.file_name.clone();
 
@@ -179,9 +225,9 @@ impl SettingsView {
             "已停用".to_string()
         };
         let status_color = if plugin.error.is_some() {
-            ACCENT_ERROR
+            pal.accent_error
         } else if plugin.enabled && plugin.loaded {
-            ACCENT_OK
+            pal.accent_ok
         } else {
             TEXT_SECONDARY
         };
@@ -193,7 +239,7 @@ impl SettingsView {
             .py_2()
             .px_3()
             .rounded_md()
-            .bg(gpui::rgba(0xffffff08))
+            .bg(pal.row_bg)
             .child(
                 div().flex().flex_col().gap_y_0p5().child(
                     div()
@@ -229,13 +275,14 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = themes::palette(cx);
         let hotkey_display = crate::hotkey::format_hotkey(&self.hotkey);
         let plugins = self.snapshot_plugins(cx);
 
         let mut root = div()
             .id("settings-root")
             .size_full()
-            .bg(PANEL_BG)
+            .bg(pal.panel_bg)
             .p_6()
             .flex()
             .flex_col()
@@ -274,7 +321,7 @@ impl Render for SettingsView {
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(TEXT_PRIMARY.opacity(0.8))
+                        .text_color(pal.text_secondary)
                         .child("启动器快捷键"),
                 )
                 .child(
@@ -287,15 +334,15 @@ impl Render for SettingsView {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(gpui::rgba(0xffffff14))
+                                .bg(pal.input_bg)
                                 .border_1()
                                 .border_color(if self.recording {
-                                    gpui::rgba(0x8ab4f8_ff)
+                                    pal.accent_info
                                 } else {
-                                    gpui::rgba(0xffffff26)
+                                    pal.input_border
                                 })
                                 .text_size(px(13.0))
-                                .text_color(gpui::white())
+                                .text_color(pal.text_primary)
                                 .child(if self.recording {
                                     "录制中…".to_string()
                                 } else {
@@ -316,17 +363,56 @@ impl Render for SettingsView {
                 .children(self.saved_at.clone().map(|msg| {
                     div()
                         .text_size(px(12.0))
-                        .text_color(ACCENT_INFO)
+                        .text_color(pal.accent_info)
                         .child(msg)
                 })),
         );
+
+        // ---- theme section ----
+        let active_stem = cx
+            .global::<crate::themes::ThemeState>()
+            .active_stem
+            .clone();
+        let user_themes = cx.global::<crate::themes::ThemeState>().user_themes.clone();
+
+        let mut theme_section = div().flex().flex_col().gap_2().child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(pal.text_secondary)
+                .child(format!(
+                    "主题 — 目录: ~/Library/Application Support/touchery/themes"
+                )),
+        );
+
+        // Built-in option (stem = None).
+        theme_section = theme_section.child(self.render_theme_row(
+            "builtin",
+            "内置主题（自动亮暗色）",
+            active_stem.is_none(),
+            &pal,
+            None,
+            cx,
+        ));
+
+        for t in &user_themes {
+            theme_section = theme_section.child(self.render_theme_row(
+                &t.stem,
+                t.display_name(),
+                active_stem.as_deref() == Some(t.stem.as_str()),
+                &pal,
+                Some(t.stem.clone()),
+                cx,
+            ));
+        }
+        root = root.child(theme_section);
 
         // ---- plugins section ----
         let mut section = div().flex().flex_col().gap_2().child(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(TEXT_PRIMARY.opacity(0.8))
+                .text_color(pal.text_secondary)
                 .child(format!(
                     "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
                     plugins.len()
@@ -338,12 +424,12 @@ impl Render for SettingsView {
                 div()
                     .py_3()
                     .text_size(px(12.0))
-                    .text_color(TEXT_SECONDARY)
+                    .text_color(pal.text_secondary)
                     .child("暂无插件，将 .lua 文件放入上述目录后重启应用"),
             );
         } else {
             for p in &plugins {
-                section = section.child(self.render_plugin_row(p, cx));
+                section = section.child(self.render_plugin_row(p, &pal, cx));
             }
         }
         root = root.child(section);

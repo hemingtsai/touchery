@@ -23,7 +23,8 @@
 | 常驻后台 | Accessory 模式，无 Dock 图标；菜单栏闪电图标提供「打开控制面板 / 退出」 |
 | 应用搜索 | 模糊匹配 + 拼音全拼 + 拼音首字母，按系统 locale 显示本地化名称（中文系统显示「微信」「计算器」） |
 | 插件系统 | LuaJIT 脚本，`>` 前缀路由，支持二级输入 |
-| 控制面板 | 快捷键录制（即时生效）、插件列表与开关管理 |
+| Lua 主题 | 亮暗色定义在同一个 `.lua` 文件中，控制面板选择，未定义颜色回退内置主题，自动跟随系统深浅色 |
+| 控制面板 | 快捷键录制（即时生效）、插件列表与开关管理、主题选择 |
 | 性能 | 应用索引启动时后台加载一次；查询为纯内存过滤 + LuaJIT 执行；窗口按需创建，唤起无冷启动 |
 
 ## 系统要求
@@ -78,6 +79,7 @@ cargo build --release
 从菜单栏闪电图标 → 「打开控制面板」打开：
 
 - **修改快捷键**：点击按钮进入录制态 → 按下任意组合键（至少一个修饰键 ⌘/⌥/⌃）→ 即时注册生效并保存；`Esc` 或再点按钮取消录制
+- **主题选择**：列出内置主题与 `themes` 目录下所有 `.lua` 主题，点击即时切换并持久化
 - **插件管理**：列出已加载插件及状态（运行中 / 已停用 / 出错原因），Switch 开关即时启用/停用并持久化
 - **关闭**：右上角按钮或 `Esc`
 
@@ -171,12 +173,70 @@ cp examples/hello.lua ~/Library/Application\ Support/touchery/plugins/
 
 验证日志写入 `~/Library/Application Support/touchery/plugin.log`。
 
+## 主题系统
+
+### 安装位置
+
+```
+~/Library/Application Support/touchery/themes/*.lua
+```
+
+放入 `.lua` 文件后**重启应用**加载，然后在控制面板「主题」区域点击选择。
+
+### 文件格式
+
+亮暗色定义在**同一个文件**中；文件必须 `return` 一个 table：
+
+```lua
+return {
+    name = "暖色纸感",   -- 可选，控制面板显示名（缺省用文件名）
+
+    light = {            -- 系统浅色外观时生效
+        card_bg        = "#faf6efF2",
+        text_primary   = "#2b2620",
+        accent_error   = "#c2452d",
+        -- ...其余键见下表
+    },
+
+    dark = {             -- 系统深色外观时生效
+        card_bg        = "#241f1aF0",
+        -- 未定义的键回退到内置暗色主题
+    },
+}
+```
+
+### 规则
+
+- **颜色格式**：`#rgb`、`#rrggbb`、`#rrggbbaa`（最后两位为透明度）
+- **回退**：未定义的单个颜色 → 回退到内置主题对应模式的值；整个 `light`/`dark` 表缺失 → 该模式完全使用内置值；两个表都空的主题文件会被跳过
+- **动态响应**：调色板在每帧渲染时按当前系统外观解析——macOS 切换深浅色后自动套用对应子表，无需重启
+- **未知键 / 非法颜色**：忽略并记录日志，不影响其他键
+
+### 可用颜色键
+
+| 键 | 用途 |
+|---|---|
+| `card_bg` | 启动器卡片背景 |
+| `card_border` | 启动器卡片边框 |
+| `panel_bg` | 控制面板背景 |
+| `row_bg` | 列表行 / 悬停高亮背景 |
+| `input_bg` | 输入框背景 |
+| `input_border` | 输入框边框 |
+| `text_primary` | 主文字 |
+| `text_secondary` | 次要文字 / 提示 |
+| `accent_info` | 信息蓝（录制态边框、当前项标记） |
+| `accent_ok` | 成功绿（插件运行状态） |
+| `accent_error` | 错误红（失败提示） |
+
+示例参见 [`examples/theme_example.lua`](examples/theme_example.lua)。
+
 ## 数据目录总览
 
 | 路径 | 内容 |
 |---|---|
 | `~/Library/Application Support/touchery/plugins/*.lua` | 插件 |
-| `~/Library/Application Support/touchery/config.json` | 快捷键 + 插件开关状态 |
+| `~/Library/Application Support/touchery/themes/*.lua` | 主题 |
+| `~/Library/Application Support/touchery/config.json` | 快捷键 + 插件开关 + 当前主题 |
 | `~/Library/Application Support/touchery/plugin.log` | 示例插件输出（仅示例写入） |
 
 ## 架构
@@ -192,8 +252,10 @@ src/
 ├── tray.rs       # tray-icon 菜单栏图标（代码光栅化闪电模板图）
 ├── launcher.rs   # 启动器视图：自建搜索栏(放大镜图标)、ListState 键盘导航接管、
 │                 # 二级输入模式状态机、插件后台查询合并
-├── ui_settings.rs# 控制面板：observe_keystrokes 快捷键录制、插件开关
-└── plugins.rs    # PluginManager：mlua(luajit+vendored) 加载/卸载、指令预算 hook
+├── ui_settings.rs# 控制面板：observe_keystrokes 快捷键录制、插件开关、主题选择
+├── plugins.rs    # PluginManager：mlua(luajit+vendored) 加载/卸载、指令预算 hook
+├── themes.rs     # Lua 主题：加载/解析/回退解析，按系统外观每帧解析调色板
+└── ui_theme.rs   # 窗口尺寸常量
 examples/hello.lua  # 示例插件
 examples/gen_icon.rs# 应用图标光栅化工具（打包用）
 scripts/build_dmg.sh# DMG 打包脚本

@@ -4,6 +4,7 @@ mod hotkey;
 mod launcher;
 mod plugins;
 mod search;
+mod themes;
 mod tray;
 mod ui_theme;
 mod ui_settings;
@@ -61,6 +62,9 @@ fn main() {
         // fully transparent so the launcher card floats over a clear window.
         // The control panel paints its own opaque background and is unaffected.
         gpui_component::Theme::global_mut(cx).background = gpui::hsla(0.0, 0.0, 0.0, 0.0);
+
+        // Load user Lua themes (~/Library/Application Support/touchery/themes).
+        themes::init(cx);
 
         set_accessory_policy();
 

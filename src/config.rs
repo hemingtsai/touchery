@@ -35,6 +35,8 @@ pub struct Config {
     pub hotkey: HotkeyConfig,
     /// plugin file name -> enabled
     pub plugins: HashMap<String, bool>,
+    /// Active theme file stem; "builtin" (or unknown) uses the built-in palette.
+    pub theme: String,
 }
 
 impl Config {
