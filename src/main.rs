@@ -169,7 +169,8 @@ fn main() {
         let apps_index_clone = apps_index.clone();
         let apps_updated_clone = apps_updated.clone();
         let mut last_event_time: Option<Instant> = None;
-        const DEBOUNCE_MS: u64 = 1000; // 1 second debounce
+        let mut needs_reindex = false;
+        const DEBOUNCE_MS: u64 = 500; // 500ms debounce
         cx.spawn(async move |cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(50))
@@ -183,36 +184,24 @@ fn main() {
                 });
             }
 
-            // Handle app file system events with debouncing
+            // Handle app file system events: drain all events, mark reindex needed.
             if let Ok(watcher_guard) = watcher_clone.try_borrow() {
                 if let Some(ref watcher) = *watcher_guard {
-                    while let Some(event) = watcher.try_recv() {
-                        let now = Instant::now();
-                        let should_update = match last_event_time {
-                            None => true,
-                            Some(last) => now.duration_since(last).as_millis() > DEBOUNCE_MS as u128,
-                        };
+                    while let Some(_event) = watcher.try_recv() {
+                        needs_reindex = true;
+                        last_event_time = Some(Instant::now());
+                    }
+                }
+            }
 
-                        if should_update {
-                            match event {
-                                watcher::AppEvent::Created(path) => {
-                                    let mut apps = apps_index_clone.write().unwrap_or_else(|e| e.into_inner());
-                                    apps::add_app_to_index(&path, &mut apps);
-                                    apps_updated_clone.store(true, Ordering::SeqCst);
-                                    last_event_time = Some(now);
-                                }
-                                watcher::AppEvent::Removed(path) => {
-                                    let mut apps = apps_index_clone.write().unwrap_or_else(|e| e.into_inner());
-                                    apps::remove_app_from_index(&path, &mut apps);
-                                    apps_updated_clone.store(true, Ordering::SeqCst);
-                                    last_event_time = Some(now);
-                                }
-                                watcher::AppEvent::Modified(_) => {
-                                    // For modified apps, we could re-index, but for now
-                                    // we'll treat it as a no-op since the app is still there
-                                }
-                            }
-                        }
+            // When debounce window expires and events were received, do full re-index.
+            if needs_reindex {
+                if let Some(last) = last_event_time {
+                    if last.elapsed().as_millis() > DEBOUNCE_MS as u128 {
+                        let new_entries = apps::enumerate_apps();
+                        *apps_index_clone.write().unwrap_or_else(|e| e.into_inner()) = new_entries;
+                        apps_updated_clone.store(true, Ordering::SeqCst);
+                        needs_reindex = false;
                     }
                 }
             }

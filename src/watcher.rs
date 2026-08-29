@@ -82,6 +82,7 @@ impl AppWatcher {
     }
 
     /// Receive an app event with timeout.
+    #[allow(dead_code)]
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<AppEvent> {
         self.receiver.recv_timeout(timeout).ok()
     }

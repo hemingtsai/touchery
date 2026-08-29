@@ -238,6 +238,7 @@ fn localized_display_name(path: &str) -> Option<String> {
 const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
 
 /// Add a single app to the index if it's a valid .app bundle.
+#[cfg(test)]
 pub fn add_app_to_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
     if let Some(entry) = make_entry(path.to_string(), None) {
         // Check for duplicates
@@ -251,6 +252,7 @@ pub fn add_app_to_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
 }
 
 /// Remove an app from the index by path.
+#[cfg(test)]
 pub fn remove_app_from_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
     let len_before = apps.len();
     apps.retain(|e| e.path != path);
