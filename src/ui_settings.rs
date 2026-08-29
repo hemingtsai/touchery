@@ -212,7 +212,7 @@ impl SettingsView {
 
     fn snapshot_plugins(&self, cx: &App) -> Vec<PluginRowView> {
         let manager = crate::plugin_manager(cx);
-        let manager = manager.lock().unwrap();
+        let manager = manager.lock().unwrap_or_else(|e| e.into_inner());
         manager
             .plugins
             .iter()
@@ -290,7 +290,7 @@ impl SettingsView {
                     .checked(plugin.enabled)
                     .on_click(move |checked: &bool, _window, cx| {
                         let pm = crate::plugin_manager(cx);
-                        let result = pm.lock().unwrap().set_enabled(&file_name, *checked);
+                        let result = pm.lock().unwrap_or_else(|e| e.into_inner()).set_enabled(&file_name, *checked);
                         entity.update(cx, |_, cx| {
                             if let Err(e) = result {
                                 eprintln!("[plugin] toggle failed: {e:#}");

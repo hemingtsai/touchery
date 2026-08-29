@@ -288,7 +288,7 @@ impl LauncherView {
                 .await;
 
             let results = cx.background_executor().spawn(async move {
-                let mut manager = pm.lock().unwrap();
+                let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
                 let mut rows = Vec::new();
                 for plugin in manager.plugins.iter_mut() {
                     if !plugin.available() {
@@ -390,7 +390,7 @@ impl LauncherView {
                     let pm = crate::plugin_manager(cx);
                     let value = item.value.clone();
                     std::thread::spawn(move || {
-                        let mut manager = pm.lock().unwrap();
+                        let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(plugin) = manager.find_by_name_mut(&plugin_name) {
                             plugin.run(&value, &last_query);
                         }
@@ -417,7 +417,7 @@ impl LauncherView {
 
         let pm = crate::plugin_manager(cx);
         std::thread::spawn(move || {
-            let mut manager = pm.lock().unwrap();
+            let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(plugin) = manager.find_by_name_mut(&plugin_name) {
                 plugin.run_sub(&value, &sub_query);
             }

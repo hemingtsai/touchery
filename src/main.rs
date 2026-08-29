@@ -143,7 +143,7 @@ fn main() {
         cx.background_executor()
             .spawn(async move {
                 let entries = apps::enumerate_apps();
-                *index_ref.write().unwrap() = entries;
+                *index_ref.write().unwrap_or_else(|e| e.into_inner()) = entries;
             })
             .detach();
 
@@ -155,7 +155,7 @@ fn main() {
         let pm_ref = plugin_manager.clone();
         cx.background_executor()
             .spawn(async move {
-                pm_ref.lock().unwrap().load_all();
+                pm_ref.lock().unwrap_or_else(|e| e.into_inner()).load_all();
             })
             .detach();
 
@@ -196,13 +196,13 @@ fn main() {
                         if should_update {
                             match event {
                                 watcher::AppEvent::Created(path) => {
-                                    let mut apps = apps_index_clone.write().unwrap();
+                                    let mut apps = apps_index_clone.write().unwrap_or_else(|e| e.into_inner());
                                     apps::add_app_to_index(&path, &mut apps);
                                     apps_updated_clone.store(true, Ordering::SeqCst);
                                     last_event_time = Some(now);
                                 }
                                 watcher::AppEvent::Removed(path) => {
-                                    let mut apps = apps_index_clone.write().unwrap();
+                                    let mut apps = apps_index_clone.write().unwrap_or_else(|e| e.into_inner());
                                     apps::remove_app_from_index(&path, &mut apps);
                                     apps_updated_clone.store(true, Ordering::SeqCst);
                                     last_event_time = Some(now);
@@ -221,7 +221,7 @@ fn main() {
                 if event.state != global_hotkey::HotKeyState::Pressed {
                     continue;
                 }
-                let current_id = *hotkey_id.read().unwrap();
+                let current_id = *hotkey_id.read().unwrap_or_else(|e| e.into_inner());
                 if event.id != current_id {
                     continue;
                 }
@@ -385,7 +385,7 @@ pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
     cx.global::<LauncherWindowState>()
         .apps_index
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
 
@@ -422,7 +422,7 @@ pub fn apply_hotkey(cx: &mut App, hk: global_hotkey::hotkey::HotKey) -> anyhow::
     }
     manager.register(hk)?;
 
-    *global.hotkey_id.write().unwrap() = hk.id();
+    *global.hotkey_id.write().unwrap_or_else(|e| e.into_inner()) = hk.id();
     drop(slot);
     *global.current_hotkey.borrow_mut() = Some(hk);
     Ok(())
