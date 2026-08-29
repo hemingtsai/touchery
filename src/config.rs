@@ -75,6 +75,10 @@ impl Config {
             std::fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)
+        // Atomic write: write to a temp file, then rename over the target.
+        // This prevents data loss if the process crashes mid-write.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &path)
     }
 }
