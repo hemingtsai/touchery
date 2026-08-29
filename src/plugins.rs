@@ -232,9 +232,9 @@ impl PluginManager {
     /// Enable/disable a plugin by file name; persists to config and
     /// loads/unloads its runtime accordingly.
     pub fn set_enabled(&mut self, file_name: &str, enabled: bool) -> anyhow::Result<()> {
-        let mut config = Config::load();
-        config.plugins.insert(file_name.to_string(), enabled);
-        config.save()?;
+        crate::config::modify(|config| {
+            config.plugins.insert(file_name.to_string(), enabled);
+        })?;
 
         let Some(plugin) = self.find_by_file_mut(file_name) else {
             return Ok(());

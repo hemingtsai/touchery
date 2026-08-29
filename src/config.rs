@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Root directory for all persistent state.
 ///
@@ -11,6 +12,21 @@ pub fn data_root() -> Option<PathBuf> {
     dirs::data_dir()
         .or_else(dirs::home_dir)
         .map(|dir| dir.join("touchery"))
+}
+
+/// Global config mutex: serializes all load-modify-save sequences to prevent
+/// lost-update races when multiple threads toggle settings concurrently.
+static CONFIG_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Atomically load, modify, and save the config. The closure receives a
+/// mutable reference to the loaded config and should apply changes in-place.
+pub fn modify(f: impl FnOnce(&mut Config)) -> std::io::Result<()> {
+    let _guard = CONFIG_MUTEX.lock().map_err(|e| {
+        std::io::Error::other(format!("config mutex poisoned: {e}"))
+    })?;
+    let mut config = Config::load();
+    f(&mut config);
+    config.save()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

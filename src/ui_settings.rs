@@ -126,15 +126,15 @@ impl SettingsView {
         let hk = HotkeyConfig { mods, key };
         match crate::hotkey::hotkey_from_config(&hk) {
             Ok(hot_key) => match crate::apply_hotkey(cx, hot_key) {
-                Ok(()) => {
-                    self.hotkey = hk.clone();
-                    let mut config = Config::load();
-                    config.hotkey = hk;
-                    match config.save() {
-                        Ok(()) => self.saved_at = Some("已保存 ✓".to_string()),
-                        Err(e) => self.saved_at = Some(format!("保存失败: {e}")),
+                Ok(()) => match crate::config::modify(|config| {
+                    config.hotkey = hk.clone();
+                }) {
+                    Ok(()) => {
+                        self.hotkey = hk;
+                        self.saved_at = Some("已保存 ✓".to_string());
                     }
-                }
+                    Err(e) => self.saved_at = Some(format!("保存失败: {e}")),
+                },
                 Err(e) => {
                     self.saved_at = Some(format!("注册失败: {e}，可能被其他应用占用"));
                     // Restore tracking of the previous combo since we may have
@@ -525,9 +525,9 @@ impl Render for SettingsView {
                         .flex_shrink_0()
                         .checked(apps_only)
                         .on_click(move |checked: &bool, _window, cx| {
-                            let mut config = crate::config::Config::load();
-                            config.apps_only = *checked;
-                            let result = config.save();
+                            let result = crate::config::modify(|config| {
+                                config.apps_only = *checked;
+                            });
                             entity.update(cx, |_, cx| {
                                 if let Err(e) = result {
                                     eprintln!("[settings] failed to save apps_only: {e}");

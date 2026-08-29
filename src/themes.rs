@@ -319,9 +319,9 @@ pub fn set_active(cx: &mut gpui::App, stem: Option<String>) -> anyhow::Result<()
         }
         state.active_stem = stem.clone();
     }
-    let mut config = crate::config::Config::load();
-    config.theme = stem.unwrap_or_else(|| "builtin".to_string());
-    config.save()?;
+    crate::config::modify(|config| {
+        config.theme = stem.unwrap_or_else(|| "builtin".to_string());
+    })?;
     Ok(())
 }
 
