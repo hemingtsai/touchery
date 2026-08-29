@@ -310,7 +310,7 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
         _ => {
             // Spotlight unavailable/disabled: plain enumeration, names fall
             // back through NSFileManager.
-            match Command::new("mdfind").args(["kMDItemContentType", "==", QUERY]).output() {
+            match Command::new("mdfind").arg(QUERY).output() {
                 Ok(o) if o.status.success() => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     stdout
