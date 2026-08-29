@@ -32,6 +32,8 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     }
 
     let exe = std::env::current_exe()?;
+    let exe_str = exe.display().to_string();
+    let escaped = xml_escape(&exe_str);
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,18 +55,21 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
 </dict>
 </plist>
 "#,
-        exe.display()
+        escaped
     );
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, xml)?;
 
-    // Reload so changes apply immediately without re-login.
+    // Unload old agent before writing new plist to avoid stale content.
     let _ = Command::new("launchctl")
         .args(["unload", &path.display().to_string()])
         .output();
+
+    std::fs::write(&path, xml)?;
+
+    // Load the new agent.
     let out = Command::new("launchctl")
         .args(["load", &path.display().to_string()])
         .output()?;
@@ -73,4 +78,13 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
         anyhow::bail!("launchctl load failed: {}", stderr.trim());
     }
     Ok(())
+}
+
+/// Escape XML special characters to prevent malformed plist or injection.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
