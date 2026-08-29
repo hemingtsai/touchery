@@ -24,10 +24,13 @@ fn bolt_icon() -> Icon {
         for i in 0..poly.len() {
             let (xi, yi) = poly[i];
             let (xj, yj) = poly[j];
-            if ((yi > py) != (yj > py))
-                && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-            {
-                inside = !inside;
+            if (yi > py) != (yj > py) {
+                // Avoid division by zero on horizontal edges.
+                if (yj - yi).abs() > f32::EPSILON
+                    && px < (xj - xi) * (py - yi) / (yj - yi) + xi
+                {
+                    inside = !inside;
+                }
             }
             j = i;
         }

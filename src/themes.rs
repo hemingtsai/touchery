@@ -9,7 +9,7 @@
 
 use crate::config::data_root;
 use gpui::Hsla;
-use mlua::{Lua, Table};
+use mlua::{Lua, StdLib, Table};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -201,7 +201,10 @@ pub fn load_theme_file(path: &std::path::Path) -> anyhow::Result<UserTheme> {
         .ok_or_else(|| anyhow::anyhow!("no file stem"))?;
     let source = std::fs::read_to_string(path)?;
 
-    let lua = Lua::new();
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH,
+        Default::default(),
+    )?;
     let table: Table = lua
         .load(&source)
         .set_name(stem.clone())
@@ -310,6 +313,7 @@ pub fn palette(cx: &gpui::App) -> Palette {
 
 /// Switch the active theme by stem (`None` = built-in); persists to config.
 pub fn set_active(cx: &mut gpui::App, stem: Option<String>) -> anyhow::Result<()> {
+    let previous_stem;
     {
         let state = cx.global_mut::<ThemeState>();
         if let Some(stem) = &stem {
@@ -317,11 +321,18 @@ pub fn set_active(cx: &mut gpui::App, stem: Option<String>) -> anyhow::Result<()
                 anyhow::bail!("unknown theme: {stem}");
             }
         }
+        previous_stem = state.active_stem.clone();
         state.active_stem = stem.clone();
     }
-    crate::config::modify(|config| {
+    let result = crate::config::modify(|config| {
         config.theme = stem.unwrap_or_else(|| "builtin".to_string());
-    })?;
+    });
+    if let Err(e) = result {
+        // Rollback global state on save failure.
+        let state = cx.global_mut::<ThemeState>();
+        state.active_stem = previous_stem;
+        return Err(e.into());
+    }
     Ok(())
 }
 

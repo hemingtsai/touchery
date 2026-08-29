@@ -79,6 +79,9 @@ pub fn hotkey_from_config(hc: &HotkeyConfig) -> anyhow::Result<HotKey> {
             _ => anyhow::bail!("unknown modifier: {m}"),
         };
     }
+    if mods.is_empty() {
+        anyhow::bail!("at least one modifier (⌘/⌥/⌃/⇧) is required");
+    }
     let code = parse_code(&hc.key).ok_or_else(|| anyhow::anyhow!("unsupported key: {}", hc.key))?;
     Ok(HotKey::new(Some(mods), code))
 }

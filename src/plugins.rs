@@ -83,8 +83,15 @@ impl Plugin {
             },
             |_, _| Err(mlua::Error::RuntimeError("execution budget exceeded".into())),
         )?;
+        // Guard ensures remove_hook is called on all exit paths (including panics).
+        struct HookGuard<'a>(&'a Lua);
+        impl Drop for HookGuard<'_> {
+            fn drop(&mut self) {
+                self.0.remove_hook();
+            }
+        }
+        let _guard = HookGuard(lua);
         let result = f();
-        lua.remove_hook();
         Ok(result?)
     }
 
