@@ -1,7 +1,7 @@
 // objc 0.2's class!/msg_send! macros internally check cfg(feature = "cargo-clippy"),
 // which cargo cannot know about; silence the resulting false-positive lints.
 #![allow(unexpected_cfgs)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
 use pinyin::ToPinyinMulti;
@@ -241,8 +241,9 @@ const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
 #[cfg(test)]
 pub fn add_app_to_index(path: &str, apps: &mut Vec<AppEntry>) -> bool {
     if let Some(entry) = make_entry(path.to_string(), None) {
-        // Check for duplicates
-        let is_dup = apps.iter().any(|e| e.path == entry.path || e.display_name_lower == entry.display_name_lower);
+        // Check for duplicates by path only (display name may differ for
+        // legitimately different apps at different paths).
+        let is_dup = apps.iter().any(|e| e.path == entry.path);
         if !is_dup {
             apps.push(entry);
             return true;
@@ -285,7 +286,7 @@ fn make_entry(path: String, localized: Option<String>) -> Option<AppEntry> {
         .file_stem()?
         .to_str()?
         .to_string();
-    if name.starts_with('.') || name.contains("uninstal") {
+    if name.starts_with('.') || name.to_lowercase().contains("uninstall") {
         return None;
     }
     Some(AppEntry::with_display_name(name, path, localized))
@@ -325,11 +326,17 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
         }
     };
 
-    // Sort by the visible (localized) name, then drop duplicates in a single
-    // pass: identical paths and identical display names are both adjacent
-    // after this sort.
+    // Sort by the visible (localized) name, then deduplicate by path and
+    // display name. Use a HashSet for reliable path-based dedup (dedup_by
+    // only catches adjacent elements).
     entries.sort_by(|a, b| a.display_name_lower.cmp(&b.display_name_lower));
-    entries.dedup_by(|a, b| a.display_name_lower == b.display_name_lower || a.path == b.path);
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    entries.retain(|e| {
+        let path_dup = !seen_paths.insert(e.path.clone());
+        let name_dup = !seen_names.insert(e.display_name_lower.clone());
+        !path_dup && !name_dup
+    });
     entries
 }
 
