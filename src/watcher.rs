@@ -45,7 +45,10 @@ impl AppWatcher {
         std::thread::spawn(move || {
             while let Ok(event) = raw_rx.recv() {
                 if let Some(app_event) = Self::convert_event(event) {
-                    let _ = app_tx.send(app_event);
+                    // Exit if receiver is dropped (app shutting down).
+                    if app_tx.send(app_event).is_err() {
+                        break;
+                    }
                 }
             }
         });

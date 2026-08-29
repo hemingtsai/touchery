@@ -338,7 +338,15 @@ fn toggle_launcher(cx: &mut App) {
     // The launcher window is mostly transparent; the native macOS shadow
     // would outline the entire invisible window rectangle. Turn it off —
     // the card draws its own CSS shadow.
-    disable_key_window_shadow();
+    // Delay slightly to ensure the window is activated (key) before
+    // querying keyWindow, as activation can be asynchronous.
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(50))
+            .await;
+        disable_key_window_shadow();
+    })
+    .detach();
 
     cx.global::<LauncherWindowState>()
         .launcher_window

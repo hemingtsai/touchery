@@ -50,6 +50,18 @@ pub fn parse_code(key: &str) -> Option<Code> {
                 10 => Code::F10,
                 11 => Code::F11,
                 12 => Code::F12,
+                13 => Code::F13,
+                14 => Code::F14,
+                15 => Code::F15,
+                16 => Code::F16,
+                17 => Code::F17,
+                18 => Code::F18,
+                19 => Code::F19,
+                20 => Code::F20,
+                21 => Code::F21,
+                22 => Code::F22,
+                23 => Code::F23,
+                24 => Code::F24,
                 _ => return None,
             })
         }
