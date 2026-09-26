@@ -16,7 +16,7 @@
 //! the `NSWindow`), so the origin produced here is relative to the display it
 //! will be shown on.
 
-use gpui::{App, Bounds, DisplayId, Pixels, PlatformDisplay, Size, point};
+use gpui::{App, Bounds, DisplayId, Pixels, PlatformDisplay, Size, point, px};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use std::rc::Rc;
@@ -134,22 +134,125 @@ pub fn target_display(cx: &App) -> Option<Rc<dyn PlatformDisplay>> {
 
 /// Bounds for a `size` window centred horizontally on `display`.
 ///
-/// `top_ratio` puts the window's top edge that fraction of the way down the
-/// display (Spotlight-style); `None` centres it vertically instead.
-///
-/// Note that `display.bounds()` is only trustworthy for its *size* — see the
-/// module docs for why the origin is ignored.
+/// See [`fit_centered`] for the placement rules; this just feeds it the
+/// display's size.
 pub fn centered_bounds(
     display: &dyn PlatformDisplay,
     size: Size<Pixels>,
     top_ratio: Option<f64>,
 ) -> Bounds<Pixels> {
-    let available = display.bounds().size;
+    fit_centered(display.bounds().size, size, top_ratio)
+}
+
+/// Centre `size` within `available`, shrinking and clamping so the result
+/// always fits inside `available`.
+///
+/// `top_ratio` puts the window's top edge that fraction of the way down the
+/// display (Spotlight-style); `None` centres it vertically. Both are clamped so
+/// a display too small for the requested placement degrades to the closest
+/// fully-visible position rather than hanging off an edge.
+///
+/// Note that `display.bounds()` is only trustworthy for its *size* — see the
+/// module docs for why the origin is ignored.
+fn fit_centered(
+    available: Size<Pixels>,
+    size: Size<Pixels>,
+    top_ratio: Option<f64>,
+) -> Bounds<Pixels> {
+    let (available_w, available_h) = (available.width.to_f64(), available.height.to_f64());
+    let (w, h) = (
+        size.width.to_f64().min(available_w),
+        size.height.to_f64().min(available_h),
+    );
+
+    let x = (available_w - w) / 2.0;
+    // The top edge cannot sit lower than this without pushing the window's
+    // bottom past the display's bottom edge.
+    let max_y = (available_h - h).max(0.0);
     let y = match top_ratio {
-        Some(ratio) => available.height * ratio as f32,
-        None => (available.height - size.height) / 2.0,
+        Some(ratio) => (available_h * ratio).clamp(0.0, max_y),
+        None => max_y / 2.0,
     };
-    let x = (available.width - size.width) / 2.0;
-    Bounds::new(point(x, y), size)
+
+    Bounds::new(
+        point(px(x as f32), px(y as f32)),
+        gpui::size(px(w as f32), px(h as f32)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds_of(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), gpui::size(px(w), px(h)))
+    }
+
+    /// Every result must satisfy `0 <= origin` and `origin + size <= available`,
+    /// since gpui offsets the window by the display's own origin.
+    fn assert_fits(available: Bounds<Pixels>, result: Bounds<Pixels>) {
+        assert!(result.origin.x >= px(0.), "x origin negative: {result:?}");
+        assert!(result.origin.y >= px(0.), "y origin negative: {result:?}");
+        assert!(
+            result.origin.x + result.size.width <= available.size.width,
+            "overflows right: {result:?} in {available:?}"
+        );
+        assert!(
+            result.origin.y + result.size.height <= available.size.height,
+            "overflows bottom: {result:?} in {available:?}"
+        );
+    }
+
+    #[test]
+    fn spotlight_centers_horizontally_and_honors_top_ratio() {
+        let display = bounds_of(0., 0., 3440., 1440.);
+        let result = fit_centered(display.size, gpui::size(px(680.), px(440.)), Some(0.30));
+        assert_eq!(result, bounds_of(1380., 432., 680., 440.));
+    }
+
+    #[test]
+    fn center_ignores_top_ratio() {
+        let display = bounds_of(0., 0., 3440., 1440.);
+        let result = fit_centered(display.size, gpui::size(px(560.), px(520.)), None);
+        assert_eq!(result, bounds_of(1440., 460., 560., 520.));
+    }
+
+    #[test]
+    fn clamps_top_ratio_on_a_short_display() {
+        // 500px tall, 440px window: 30% would be y=150, which would push the
+        // bottom to 590 — past the display. Clamp to the max, y=60.
+        let display = bounds_of(0., 0., 1280., 500.);
+        let result = fit_centered(display.size, gpui::size(px(680.), px(440.)), Some(0.30));
+        assert_eq!(result, bounds_of(300., 60., 680., 440.));
+        assert_fits(display, result);
+    }
+
+    #[test]
+    fn shrinks_to_fit_a_narrower_display() {
+        let display = bounds_of(0., 0., 480., 800.);
+        let result = fit_centered(display.size, gpui::size(px(680.), px(440.)), Some(0.30));
+        assert_eq!(result.size, gpui::size(px(480.), px(440.)));
+        assert_eq!(result.origin.x, px(0.));
+        assert_fits(display, result);
+    }
+
+    #[test]
+    fn clamps_when_display_is_shorter_than_the_window() {
+        let display = bounds_of(0., 0., 1024., 300.);
+        let result = fit_centered(display.size, gpui::size(px(680.), px(440.)), Some(0.30));
+        assert_eq!(result.size.height, px(300.));
+        assert_eq!(result.origin.y, px(0.));
+        assert_fits(display, result);
+    }
+
+    #[test]
+    fn exact_fit_pins_to_the_top() {
+        // The window fills the display vertically, so the top ratio has no
+        // room to move it: y clamps to 0 rather than overflowing the bottom.
+        let display = bounds_of(0., 0., 680., 440.);
+        let result = fit_centered(display.size, gpui::size(px(680.), px(440.)), Some(0.30));
+        assert_eq!(result, bounds_of(0., 0., 680., 440.));
+        assert_fits(display, result);
+    }
 }
 
