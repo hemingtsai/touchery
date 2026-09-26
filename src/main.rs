@@ -352,15 +352,7 @@ fn toggle_launcher(cx: &mut App) {
     // The launcher window is mostly transparent; the native macOS shadow
     // would outline the entire invisible window rectangle. Turn it off —
     // the card draws its own CSS shadow.
-    // Delay slightly to ensure the window is activated (key) before
-    // querying keyWindow, as activation can be asynchronous.
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(50))
-            .await;
-        disable_key_window_shadow();
-    })
-    .detach();
+    disable_launcher_shadow();
 
     cx.global::<LauncherWindowState>()
         .launcher_window
@@ -468,15 +460,27 @@ fn set_accessory_policy() {
     }
 }
 
-/// Turn off the native shadow of the current key window. Called right after
-/// the launcher window is opened (it is key at that point). gpui exposes no
-/// shadow toggle, and the native shadow would outline the full transparent
-/// window rectangle.
+/// Turn off the native shadow of the launcher window. Called right after the
+/// launcher window is opened. gpui exposes no shadow toggle, and the native
+/// shadow would outline the full transparent window rectangle.
 ///
-/// Safety: standard NSApplication/NSWindow selectors, null-checked. If the
-/// key window cannot be resolved the call is a no-op (worst case: the shadow
-/// remains visible).
-fn disable_key_window_shadow() {
+/// The launcher is created as a `WindowKind::PopUp`, which gpui backs with an
+/// `NSPanel` subclass; the control panel is a `WindowKind::Normal` and is a
+/// plain `NSWindow`. Being an `NSPanel` is how the launcher is told apart here,
+/// because gpui gives no way to address a specific window's `NSWindow` — gpui
+/// itself distinguishes them the same way.
+///
+/// Walking `[NSApplication windows]` rather than `keyWindow` also keeps this off
+/// other processes: `keyWindow` resolves against whichever app is frontmost, so
+/// a focus change during window activation would otherwise strip the shadow off
+/// an unrelated window (or another app's). Enumerating our own windows needs no
+/// activation to have completed, so this can run synchronously instead of after
+/// a delay.
+///
+/// Safety: standard NSApplication/NSWindow selectors, null-checked. If no
+/// launcher window is found the call is a no-op (worst case: the shadow remains
+/// visible).
+fn disable_launcher_shadow() {
     use objc::class;
     use objc::msg_send;
     use objc::runtime::{Object, NO};
@@ -488,11 +492,22 @@ fn disable_key_window_shadow() {
         if app.is_null() {
             return;
         }
-        let key_window: *mut Object = msg_send![app, keyWindow];
-        if key_window.is_null() {
+        let windows: *mut Object = msg_send![app, windows];
+        if windows.is_null() {
             return;
         }
-        let _: () = msg_send![key_window, setHasShadow: NO];
+        let panel_class = &*class!(NSPanel);
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: *mut Object = msg_send![windows, objectAtIndex: index];
+            if window.is_null() {
+                continue;
+            }
+            if !msg_send![window, isKindOfClass: panel_class] {
+                continue;
+            }
+            let _: () = msg_send![window, setHasShadow: NO];
+        }
     }
 }
 
