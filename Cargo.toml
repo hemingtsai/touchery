@@ -9,6 +9,7 @@ gpui-component = "0.5.1"
 global-hotkey = "0.8"
 pinyin = "0.10"
 objc = "0.2"
+block = "0.1"
 anyhow = "1"
 tray-icon = "0.21"
 serde = { version = "1.0.229", features = ["derive"] }

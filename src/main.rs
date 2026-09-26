@@ -60,6 +60,9 @@ struct LauncherWindowState {
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
     /// Flag to notify launcher that apps list was updated.
     apps_updated: Arc<AtomicBool>,
+    /// Raised by `observe_panel_blur` when the launcher panel stops being the
+    /// key window. The poll loop turns it into a close.
+    panel_blurred: Arc<AtomicBool>,
 }
 
 impl Global for LauncherWindowState {}
@@ -123,6 +126,7 @@ fn main() {
         };
 
         let apps_updated = Arc::new(AtomicBool::new(false));
+        let panel_blurred = Arc::new(AtomicBool::new(false));
 
         cx.set_global(LauncherWindowState {
             launcher_window: RefCell::new(None),
@@ -134,7 +138,12 @@ fn main() {
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
             apps_updated: apps_updated.clone(),
+            panel_blurred: panel_blurred.clone(),
         });
+
+        // Dismiss the launcher as soon as the user looks away from it.
+        let blur_flag = panel_blurred.clone();
+        observe_panel_blur(panel_blurred);
 
         // Bind Escape globally so the launcher window can dismiss itself.
         cx.bind_keys([KeyBinding::new("escape", launcher::LauncherCancel, None)]);
@@ -205,6 +214,14 @@ fn main() {
                         needs_reindex = false;
                     }
                 }
+            }
+
+            // The user looked away from the launcher (clicked another app,
+            // Cmd-Tabbed, raised the control panel): dismiss it. The observer
+            // only raises the flag; closing here keeps gpui out of AppKit's
+            // notification callback.
+            if blur_flag.swap(false, Ordering::SeqCst) {
+                let _ = cx.update(close_launcher);
             }
 
             while let Ok(event) = receiver.try_recv() {
@@ -354,6 +371,13 @@ fn toggle_launcher(cx: &mut App) {
     // the card draws its own CSS shadow.
     disable_launcher_shadow();
 
+    // Opening a window can shuffle key status around; only a blur *after* this
+    // point should dismiss the launcher, so drop anything raised while it was
+    // being created and activated.
+    cx.global::<LauncherWindowState>()
+        .panel_blurred
+        .store(false, Ordering::SeqCst);
+
     cx.global::<LauncherWindowState>()
         .launcher_window
         .borrow_mut()
@@ -457,6 +481,71 @@ fn set_accessory_policy() {
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
         // NSApplicationActivationPolicyAccessory = 1
         let _: () = msg_send![app, setActivationPolicy: 1i64];
+    }
+}
+
+/// Raise `flag` whenever one of our `NSPanel` windows stops being the key
+/// window, which is how the launcher learns the user has looked away.
+///
+/// `windowDidResignKey:` is the authoritative AppKit signal for that, unlike
+/// polling `isKeyWindow`, which says nothing useful about a non-activating panel
+/// while the app is inactive. gpui receives the notification but exposes no
+/// focus-lost callback, so we watch it ourselves.
+///
+/// The observer is filtered to `NSPanel`, the launcher being the only window of
+/// that kind here. That keeps two cases apart: raising the launcher while the
+/// control panel is open resigns the *panel's* key status and must not dismiss
+/// anything, and a genuine blur of the launcher must.
+///
+/// The block only sets a flag — the poll loop does the close — because calling
+/// into gpui from inside an AppKit notification risks re-entering an update cycle
+/// that is already running.
+///
+/// The observer token is deliberately retained for the life of the process: the
+/// notification center drops the registration when it is deallocated, and this
+/// app is a menu-bar singleton that should keep observing until it quits.
+///
+/// Safety: standard NSNotificationCenter/NSNotification selectors on objects that
+/// AppKit guarantees are non-null for this notification.
+fn observe_panel_blur(flag: Arc<AtomicBool>) {
+    use block::ConcreteBlock;
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let block = ConcreteBlock::new(move |notification: *mut Object| {
+        unsafe {
+            if notification.is_null() {
+                return;
+            }
+            let window: *mut Object = msg_send![notification, object];
+            if window.is_null() {
+                return;
+            }
+            if !msg_send![window, isKindOfClass: &*class!(NSPanel)] {
+                return;
+            }
+            flag.store(true, Ordering::SeqCst);
+        }
+    });
+    let block = block.copy();
+
+    let null: *mut Object = std::ptr::null_mut();
+    unsafe {
+        let center: *mut Object = msg_send![class!(NSNotificationCenter), defaultCenter];
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"NSWindowDidResignKeyNotification".as_ptr()
+        ];
+        let token: *mut Object = msg_send![
+            center,
+            addObserverForName: name
+            object: null
+            queue: null
+            usingBlock: block
+        ];
+        if !token.is_null() {
+            let _: () = msg_send![token, retain];
+        }
     }
 }
 
