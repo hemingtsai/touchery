@@ -4,6 +4,7 @@
 mod apps;
 mod autostart;
 mod config;
+mod display;
 mod hotkey;
 mod launcher;
 mod plugins;
@@ -482,76 +483,24 @@ fn disable_key_window_shadow() {
     }
 }
 
-/// Global mouse position in AppKit coordinates (origin at the bottom-left of
-/// the primary screen, y up).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NSPoint {
-    x: f64,
-    y: f64,
-}
-
-unsafe impl objc::Encode for NSPoint {
-    fn encode() -> objc::Encoding {
-        // Objective-C type encoding for CGPoint { double x; double y; }.
-        unsafe { objc::Encoding::from_str("{CGPoint=dd}") }
-    }
-}
-
-fn mouse_location() -> Option<NSPoint> {
-    use objc::runtime::Object;
-    use objc::{class, msg_send, sel, sel_impl};
-    unsafe {
-        // +[NSEvent mouseLocation] returns an NSPoint by value (never NULL);
-        // the only failure mode is a missing NSEvent class, which cannot
-        // happen on any macOS version this app supports. We still guard
-        // against a null class pointer for soundness.
-        let ns_event: *mut Object = msg_send![class!(NSEvent), class];
-        if ns_event.is_null() {
-            return None;
-        }
-        let point: NSPoint = msg_send![ns_event, mouseLocation];
-        Some(point)
-    }
-}
-
 /// Compute the launcher window bounds on the display currently under the
-/// mouse cursor: horizontally centered, top edge fixed at 30% of the screen
+/// mouse cursor: horizontally centered, top edge fixed at 30% of that display's
 /// height. Returns the bounds plus that display's id.
 fn compute_spotlight_bounds(cx: &App) -> (Bounds<Pixels>, Option<DisplayId>) {
-    let displays = cx.displays();
-    let launcher_size = ui_theme::launcher_size();
-    let (w, h) = (launcher_size.width, launcher_size.height);
-
-    let mut target = cx.primary_display();
-    if let Some(point) = mouse_location() {
-        // Convert from AppKit coords (y up, primary bottom-left) to gpui's
-        // global top-left-origin space using the primary screen height.
-        if let Some(primary) = cx.primary_display() {
-            let primary_h = primary.bounds().size.height.to_f64();
-            let mx = point.x;
-            let my_top_left = primary_h - point.y;
-
-            target = displays.into_iter().find(|display| {
-                let b = display.bounds();
-                mx >= b.origin.x.to_f64()
-                    && mx < b.origin.x.to_f64() + b.size.width.to_f64()
-                    && my_top_left >= b.origin.y.to_f64()
-                    && my_top_left < b.origin.y.to_f64() + b.size.height.to_f64()
-            });
+    match display::target_display(cx) {
+        Some(display) => {
+            let bounds = display::centered_bounds(
+                display.as_ref(),
+                ui_theme::launcher_size(),
+                Some(ui_theme::LAUNCHER_TOP_RATIO),
+            );
+            (bounds, Some(display.id()))
         }
-    }
-
-    let Some(display) = target else {
-        return (
-            Bounds::new(point(px(100.), px(100.)), gpui::size(w, h)),
+        // No display reported at all (headless, or every screen asleep): keep a
+        // usable size and let gpui choose the screen.
+        None => (
+            Bounds::new(point(px(0.), px(0.)), ui_theme::launcher_size()),
             None,
-        );
-    };
-
-    let db = display.bounds();
-    let x = db.origin.x + (db.size.width - w) / 2.0;
-    let y = db.origin.y
-        + db.size.height * ui_theme::LAUNCHER_TOP_RATIO as f32;
-    (Bounds::new(Point::new(x, y), Size::new(w, h)), Some(display.id()))
+        ),
+    }
 }
