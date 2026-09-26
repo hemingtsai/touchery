@@ -244,13 +244,25 @@ pub fn open_settings(cx: &mut App) {
             .take();
     }
 
+    // Open on the display the cursor is on (falling back to the primary
+    // display), centred there — not at a fixed offset on whatever display
+    // happens to be primary.
+    let settings_size = ui_theme::settings_size();
+    let (bounds, display_id) = match display::target_display(cx) {
+        Some(display) => (
+            display::centered_bounds(display.as_ref(), settings_size, None),
+            Some(display.id()),
+        ),
+        None => (
+            Bounds::new(point(px(0.), px(0.)), settings_size),
+            None,
+        ),
+    };
+
     let handle = cx
         .open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(60.), px(60.)),
-                    ui_theme::settings_size(),
-                ))),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Touchery 设置".into()),
                     appears_transparent: false,
@@ -260,6 +272,7 @@ pub fn open_settings(cx: &mut App) {
                 is_resizable: true,
                 is_minimizable: true,
                 window_min_size: Some(ui_theme::settings_min_size()),
+                display_id,
                 focus: true,
                 ..Default::default()
             },
