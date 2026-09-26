@@ -139,6 +139,12 @@ impl AppEntry {
 
 const APPS_MARKER: &str = "/Applications/";
 
+/// Roots that hold user-facing apps without containing an `/Applications/`
+/// component. Finder and its sibling "Finder applications" (AirDrop, Computer,
+/// Recents, Network) live in CoreServices, so they would otherwise be dropped
+/// by the "apps only" filter.
+const EXTRA_USER_ROOTS: &[&str] = &["/System/Library/CoreServices/"];
+
 /// Localized folder-name cache shared across one enumeration run; most apps
 /// share the same few ancestors (Utilities etc.), so we hit NSFileManager
 /// once per distinct folder.
@@ -176,10 +182,15 @@ fn folder_name(path: &str) -> String {
 fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<PathComponent>, bool) {
     let Some(root_idx) = bundle_path.find(APPS_MARKER) else {
         // Not under an Applications root: treat the app alone as its own
-        // component (still slash-searchable), but flag it as out-of-scope.
+        // component (still slash-searchable). Apps under a known
+        // user-facing root (CoreServices: Finder & friends) still count as
+        // in-scope; anything else is flagged out-of-scope.
+        let in_app_dir = EXTRA_USER_ROOTS
+            .iter()
+            .any(|root| bundle_path.starts_with(root));
         return (
             vec![PathComponent::new(app_display_name.to_string())],
-            false,
+            in_app_dir,
         );
     };
 
@@ -374,6 +385,23 @@ mod tests {
 
         let (_, in_app_dir) =
             build_path_components("/usr/libexec/SomeHelper.app", "SomeHelper");
+        assert!(!in_app_dir);
+    }
+
+    #[test]
+    fn finder_in_coreservices_is_user_facing() {
+        // 访达 lives in CoreServices, not under an /Applications/ root.
+        let (components, in_app_dir) =
+            build_path_components("/System/Library/CoreServices/Finder.app", "访达");
+        assert!(in_app_dir, "Finder must survive the apps-only filter");
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].name_lower, "访达");
+
+        // A genuine system helper outside every known user root stays out.
+        let (_, in_app_dir) = build_path_components(
+            "/System/Library/PrivateFrameworks/Something.framework/Versions/A/Helper.app",
+            "Helper",
+        );
         assert!(!in_app_dir);
     }
 }
