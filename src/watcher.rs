@@ -63,20 +63,20 @@ impl AppWatcher {
     }
 
     /// Get all paths that should be watched for app changes.
+    ///
+    /// Both roots are watched even when they do not exist yet: an FSEvents
+    /// stream accepts a missing path and reports it once it appears, whereas
+    /// deciding at startup that `~/Applications` is absent means every app
+    /// installed there afterwards is missed until the next restart. Other
+    /// locations are deliberately not watched — the index itself comes from
+    /// Spotlight over the whole volume, so an app installed elsewhere is
+    /// picked up by the next full scan.
     fn watch_paths() -> Vec<String> {
-        let mut paths = Vec::new();
-
-        // System applications
-        if Path::new("/Applications").exists() {
-            paths.push("/Applications".to_string());
-        }
+        let mut paths = vec!["/Applications".to_string()];
 
         // User applications
         if let Some(home) = dirs::home_dir() {
-            let user_apps = home.join("Applications");
-            if user_apps.exists() {
-                paths.push(user_apps.to_string_lossy().into_owned());
-            }
+            paths.push(home.join("Applications").to_string_lossy().into_owned());
         }
 
         paths
@@ -157,6 +157,17 @@ mod tests {
             event_id: 0,
             flag,
             path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn both_application_roots_are_watched_even_when_absent() {
+        let paths = AppWatcher::watch_paths();
+        assert!(paths.contains(&"/Applications".to_string()), "{paths:?}");
+
+        if let Some(home) = dirs::home_dir() {
+            let expected = home.join("Applications").to_string_lossy().into_owned();
+            assert!(paths.contains(&expected), "{paths:?}");
         }
     }
 
