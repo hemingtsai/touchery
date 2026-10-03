@@ -7,6 +7,7 @@ mod config;
 mod display;
 mod hotkey;
 mod launcher;
+mod lua_budget;
 mod plugins;
 mod search;
 mod themes;

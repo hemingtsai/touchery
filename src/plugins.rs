@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::lua_budget;
 use anyhow::Context as _;
 use mlua::{Function, Lua, Table};
 use std::path::PathBuf;
@@ -23,10 +24,6 @@ pub struct Plugin {
     run_sub_fn: Option<Function>,
 }
 
-/// Instruction budget per Lua call; exceeding it aborts the plugin so a
-/// runaway script can never freeze the UI.
-const INSTRUCTION_BUDGET: u32 = 20_000_000;
-
 impl Plugin {
     pub(crate) fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let file_name = path
@@ -44,7 +41,11 @@ impl Plugin {
             .with_context(|| format!("failed to read plugin {}", path.display()))?;
 
         let lua = Lua::new();
-        lua.load(&source).exec()?;
+        // Harden before the chunk runs so even the plugin's top-level code is
+        // covered by the execution budget.
+        lua_budget::disable_jit(&lua);
+        lua_budget::with_budget(&lua, || lua.load(&source).exec())
+            .with_context(|| format!("failed to initialize plugin {}", path.display()))?;
 
         let get_items_fn = lua.globals().get::<Option<Function>>("get_items")?;
         let run_fn = lua.globals().get::<Option<Function>>("run")?;
@@ -83,33 +84,6 @@ impl Plugin {
         }
     }
 
-    /// Call with an execution budget; converts budget overrun into a normal error.
-    ///
-    /// Concurrency invariant: the set_hook/remove_hook pair is not atomic, so
-    /// every caller must hold the `PluginManager` mutex while invoking this —
-    /// which serializes all Lua access and makes hook mutation safe. (The
-    /// launcher's background query task and run/run_sub threads all lock the
-    /// manager for the duration of the call.)
-    fn with_budget<T>(lua: &Lua, f: impl FnOnce() -> mlua::Result<T>) -> anyhow::Result<T> {
-        lua.set_hook(
-            mlua::HookTriggers {
-                every_nth_instruction: Some(INSTRUCTION_BUDGET),
-                ..mlua::HookTriggers::new()
-            },
-            |_, _| Err(mlua::Error::RuntimeError("execution budget exceeded".into())),
-        )?;
-        // Guard ensures remove_hook is called on all exit paths (including panics).
-        struct HookGuard<'a>(&'a Lua);
-        impl Drop for HookGuard<'_> {
-            fn drop(&mut self) {
-                self.0.remove_hook();
-            }
-        }
-        let _guard = HookGuard(lua);
-        let result = f();
-        Ok(result?)
-    }
-
     /// Whether this plugin is enabled and has a live runtime.
     pub fn available(&self) -> bool {
         self.enabled && self.lua.is_some() && self.get_items_fn.is_some()
@@ -129,7 +103,7 @@ impl Plugin {
         let Some(get_items) = self.get_items_fn.clone() else {
             return Vec::new();
         };
-        match Self::with_budget(lua, || {
+        match lua_budget::with_budget(lua, || {
             let table: Table = get_items.call(query)?;
             let mut items = Vec::new();
             for entry in table.sequence_values::<Table>() {
@@ -174,7 +148,7 @@ impl Plugin {
         let Some(lua) = self.lua.as_ref() else {
             return;
         };
-        let result = Self::with_budget(lua, || {
+        let result = lua_budget::with_budget(lua, || {
             run_fn.call::<()>((value.to_string(), query.to_string()))
         });
         if let Err(e) = result {

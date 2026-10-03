@@ -15,11 +15,16 @@ pub struct SettingsView {
     hotkey: HotkeyConfig,
     recording: bool,
     saved_at: Option<String>,
+    /// Cached plugin rows. Refreshed from a timer (and opportunistically from
+    /// render) so painting never waits on the plugin lock, which a runaway
+    /// plugin can hold for an unbounded time.
+    plugin_rows: Vec<PluginRowView>,
     _keystroke_subscription: Subscription,
+    _plugin_refresh_task: Task<()>,
 }
 
 /// Snapshot row of a plugin for rendering.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct PluginRowView {
     file_name: String,
     name: String,
@@ -39,12 +44,35 @@ impl SettingsView {
         // chance to consume the key.)
         let keystroke_subscription = cx.observe_keystrokes(Self::on_any_keystroke);
 
-        Self {
+        // Poll the plugin manager for a cheap, non-blocking state snapshot.
+        // Enabling a plugin loads Lua, so the manager lock must never be taken
+        // on the UI thread.
+        let plugin_refresh_task = cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let alive = this
+                .update(cx, |view, cx| {
+                    if view.refresh_plugin_rows(cx) {
+                        cx.notify();
+                    }
+                })
+                .is_ok();
+            if !alive {
+                break; // the control panel is gone
+            }
+        });
+
+        let mut view = Self {
             hotkey: config.hotkey,
             recording: false,
             saved_at: None,
+            plugin_rows: Vec::new(),
             _keystroke_subscription: keystroke_subscription,
-        }
+            _plugin_refresh_task: plugin_refresh_task,
+        };
+        view.refresh_plugin_rows(cx);
+        view
     }
 
     fn start_recording(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -222,10 +250,16 @@ impl SettingsView {
             })
     }
 
-    fn snapshot_plugins(&self, cx: &App) -> Vec<PluginRowView> {
+    /// Refresh the cached plugin rows when the manager lock happens to be
+    /// free. Returns whether anything changed. `try_lock` is what keeps the UI
+    /// responsive: while a plugin is executing, the panel simply keeps showing
+    /// the previous snapshot instead of blocking on the lock.
+    fn refresh_plugin_rows(&mut self, cx: &App) -> bool {
         let manager = crate::plugin_manager(cx);
-        let manager = manager.lock().unwrap_or_else(|e| e.into_inner());
-        manager
+        let Ok(manager) = manager.try_lock() else {
+            return false;
+        };
+        let rows: Vec<PluginRowView> = manager
             .plugins
             .iter()
             .map(|p| PluginRowView {
@@ -235,7 +269,12 @@ impl SettingsView {
                 loaded: p.runtime_loaded(),
                 error: p.error.clone(),
             })
-            .collect()
+            .collect();
+        if rows == self.plugin_rows {
+            return false;
+        }
+        self.plugin_rows = rows;
+        true
     }
 
     fn render_plugin_row(
@@ -302,10 +341,31 @@ impl SettingsView {
                     .checked(plugin.enabled)
                     .on_click(move |checked: &bool, _window, cx| {
                         let pm = crate::plugin_manager(cx);
-                        let result = pm.lock().unwrap_or_else(|e| e.into_inner()).set_enabled(&file_name, *checked);
-                        entity.update(cx, |_, cx| {
-                            if let Err(e) = result {
-                                eprintln!("[plugin] toggle failed: {e:#}");
+                        let checked = *checked;
+                        let file_name_for_task = file_name.clone();
+                        // Loading/unloading a plugin runs its Lua, so it must
+                        // not happen on the UI thread; the refresh timer above
+                        // picks up the outcome.
+                        cx.background_executor()
+                            .spawn(async move {
+                                let result = pm
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .set_enabled(&file_name_for_task, checked);
+                                if let Err(e) = result {
+                                    eprintln!("[plugin] toggle failed: {e:#}");
+                                }
+                            })
+                            .detach();
+                        // Reflect the click immediately; a later refresh
+                        // corrects the row if the change did not stick.
+                        entity.update(cx, |view, cx| {
+                            if let Some(row) = view
+                                .plugin_rows
+                                .iter_mut()
+                                .find(|row| row.file_name == file_name)
+                            {
+                                row.enabled = checked;
                             }
                             cx.notify();
                         });
@@ -318,7 +378,8 @@ impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = themes::palette(cx);
         let hotkey_display = crate::hotkey::format_hotkey(&self.hotkey);
-        let plugins = self.snapshot_plugins(cx);
+        self.refresh_plugin_rows(cx);
+        let plugins = self.plugin_rows.clone();
 
         let mut root = div()
             .id("settings-root")
