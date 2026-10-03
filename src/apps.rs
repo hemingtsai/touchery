@@ -322,22 +322,69 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
                 .collect()
         }
         _ => {
-            // Spotlight unavailable/disabled: plain enumeration, names fall
-            // back through NSFileManager.
-            match Command::new("mdfind").arg(QUERY).output() {
-                Ok(o) if o.status.success() => {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    stdout
-                        .lines()
-                        .filter_map(|line| make_entry(line.trim().to_string(), None))
-                        .collect()
-                }
-                _ => Vec::new(),
-            }
+            // Spotlight unavailable/disabled or still empty: walk the known
+            // application roots. Repeating the same mdfind query cannot help —
+            // it fails for exactly the same reason the first one did.
+            eprintln!("[apps] Spotlight returned no applications; scanning the filesystem instead");
+            scan_app_roots()
         }
     };
 
     dedup_entries(entries)
+}
+
+/// Roots scanned when Spotlight cannot answer. They cover user-installed apps,
+/// system apps, Finder and friends, plus the per-user Applications folder.
+const FALLBACK_ROOTS: &[&str] = &[
+    "/Applications",
+    "/System/Applications",
+    "/System/Library/CoreServices",
+];
+
+/// How deep below a root to look for bundles. Applications normally sit in a
+/// root or one folder down (`Utilities`); the limit also stops symlink cycles.
+const FALLBACK_MAX_DEPTH: usize = 3;
+
+/// Enumerate application bundles by walking the known roots.
+fn scan_app_roots() -> Vec<AppEntry> {
+    let mut roots: Vec<std::path::PathBuf> = FALLBACK_ROOTS
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+
+    let mut entries = Vec::new();
+    for root in roots {
+        collect_bundles(&root, 0, &mut entries);
+    }
+    entries
+}
+
+/// Collect `.app` bundles below `dir` into `out`, without descending into a
+/// bundle: the applications inside one are helpers, not entries to launch.
+fn collect_bundles(dir: &std::path::Path, depth: usize, out: &mut Vec<AppEntry>) {
+    if depth > FALLBACK_MAX_DEPTH {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "app") {
+            if path.is_dir() {
+                if let Some(app) = make_entry(path.to_string_lossy().into_owned(), None) {
+                    out.push(app);
+                }
+            }
+            continue;
+        }
+        if path.is_dir() {
+            collect_bundles(&path, depth + 1, out);
+        }
+    }
 }
 
 /// Collapse the raw enumeration into the searchable index.
@@ -439,6 +486,29 @@ mod tests {
 
         // Exact duplicate paths still collapse.
         assert_eq!(dedup_entries(vec![installed.clone(), installed]).len(), 1);
+    }
+
+    #[test]
+    fn fallback_scan_finds_bundles_but_not_helpers_inside_them() {
+        let dir = std::env::temp_dir().join("touchery-apps-scan-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("App.app/Contents/Helper.app")).unwrap();
+        std::fs::create_dir_all(dir.join("Utilities/Nested.app")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not an app").unwrap();
+
+        let mut found = Vec::new();
+        collect_bundles(&dir, 0, &mut found);
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(names.contains(&"App"), "{names:?}");
+        assert!(names.contains(&"Nested"), "{names:?}");
+        assert!(
+            !names.contains(&"Helper"),
+            "a bundle inside another bundle must not be listed: {names:?}"
+        );
+        assert_eq!(found.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
