@@ -68,6 +68,21 @@ impl Plugin {
         })
     }
 
+    /// Metadata-only entry for a plugin that has no live runtime — either
+    /// disabled by the user or failed to load.
+    fn unloaded(file_name: String, name: String, enabled: bool) -> Self {
+        Self {
+            file_name,
+            name,
+            enabled,
+            error: None,
+            lua: None,
+            get_items_fn: None,
+            run_fn: None,
+            run_sub_fn: None,
+        }
+    }
+
     /// Call with an execution budget; converts budget overrun into a normal error.
     ///
     /// Concurrency invariant: the set_hook/remove_hook pair is not atomic, so
@@ -215,28 +230,40 @@ impl PluginManager {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             let enabled = *config.plugins.get(&file_name).unwrap_or(&true);
+            Self::load_file(&mut self.plugins, &path, enabled);
+        }
+    }
 
-            match Plugin::load(&path) {
-                Ok(mut plugin) => {
-                    plugin.enabled = enabled;
-                    self.plugins.push(plugin);
-                }
-                Err(e) => {
-                    eprintln!("[plugin] failed to load {}: {e:#}", path.display());
-                    self.plugins.push(Plugin {
-                        file_name,
-                        name: path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_default(),
-                        enabled,
-                        error: Some(format!("{e:#}")),
-                        lua: None,
-                        get_items_fn: None,
-                        run_fn: None,
-                        run_sub_fn: None,
-                    });
-                }
+    /// Load one plugin file into `plugins`. A plugin that the user disabled is
+    /// registered as metadata only: its chunk is never executed, so a file
+    /// with side effects — or one disabled because it misbehaves — cannot run
+    /// on startup. `set_enabled` performs the actual load when the user turns
+    /// it back on.
+    fn load_file(plugins: &mut Vec<Plugin>, path: &std::path::Path, enabled: bool) {
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if !enabled {
+            plugins.push(Plugin::unloaded(file_name, name, false));
+            return;
+        }
+
+        match Plugin::load(path) {
+            Ok(mut plugin) => {
+                plugin.enabled = true;
+                plugins.push(plugin);
+            }
+            Err(e) => {
+                eprintln!("[plugin] failed to load {}: {e:#}", path.display());
+                let mut plugin = Plugin::unloaded(file_name, name, enabled);
+                plugin.error = Some(format!("{e:#}"));
+                plugins.push(plugin);
             }
         }
     }
@@ -284,6 +311,68 @@ impl PluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_probe_plugin(dir: &std::path::Path, marker: &std::path::Path) -> PathBuf {
+        let plugin_path = dir.join("probe.lua");
+        std::fs::write(
+            &plugin_path,
+            format!(
+                r##"
+                local f = assert(io.open("{marker}", "w"))
+                f:write("ran")
+                f:close()
+                function get_items(query) return {{}} end
+                function run(value, query) end
+                function run_sub(value, sub_query) end
+                "##,
+                marker = marker.display()
+            ),
+        )
+        .unwrap();
+        plugin_path
+    }
+
+    #[test]
+    fn disabled_plugins_are_not_executed_at_startup() {
+        let dir = std::env::temp_dir().join("touchery-plugin-disabled-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("marker.txt");
+        let _ = std::fs::remove_file(&marker);
+        let plugin_path = write_probe_plugin(&dir, &marker);
+
+        let mut plugins = Vec::new();
+        PluginManager::load_file(&mut plugins, &plugin_path, false);
+
+        assert!(!marker.exists(), "a disabled plugin must not run its chunk");
+        assert_eq!(plugins.len(), 1);
+        assert!(!plugins[0].enabled);
+        assert!(!plugins[0].runtime_loaded());
+
+        // Enabling it loads the runtime and executes the chunk.
+        PluginManager::load_file(&mut plugins, &plugin_path, true);
+        assert!(marker.exists(), "an enabled plugin must be loaded");
+        assert!(plugins[1].enabled);
+        assert!(plugins[1].runtime_loaded());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failing_plugin_is_reported_without_a_runtime() {
+        let dir = std::env::temp_dir().join("touchery-plugin-broken-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plugin_path = dir.join("broken.lua");
+        std::fs::write(&plugin_path, "error('TOP_LEVEL_BOOM')").unwrap();
+
+        let mut plugins = Vec::new();
+        PluginManager::load_file(&mut plugins, &plugin_path, true);
+
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].error.as_deref().unwrap_or("").contains("TOP_LEVEL_BOOM"));
+        assert!(!plugins[0].runtime_loaded());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn run_sub_dispatches_to_the_secondary_handler() {
