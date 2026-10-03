@@ -145,29 +145,29 @@ const APPS_MARKER: &str = "/Applications/";
 /// by the "apps only" filter.
 const EXTRA_USER_ROOTS: &[&str] = &["/System/Library/CoreServices/"];
 
-/// Localized folder-name cache shared across one enumeration run; most apps
-/// share the same few ancestors (Utilities etc.), so we hit NSFileManager
-/// once per distinct folder.
-struct FolderLocalizer {
-    cache: HashMap<String, String>,
+thread_local! {
+    /// Localized folder names, keyed by absolute path.
+    ///
+    /// The cache is per thread rather than per enumeration on purpose: most
+    /// apps share the same few ancestors (Utilities, …), so a full scan hits
+    /// NSFileManager once per distinct folder instead of once per app, and the
+    /// names of existing folders do not change while the app runs.
+    static FOLDER_NAMES: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
-impl FolderLocalizer {
-    fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    fn localized(&mut self, folder_path: &str) -> String {
-        if let Some(hit) = self.cache.get(folder_path) {
+/// Localized name of a folder, memoized for this thread.
+fn localized_folder(folder_path: &str) -> String {
+    FOLDER_NAMES.with(|cache| {
+        if let Some(hit) = cache.borrow().get(folder_path) {
             return hit.clone();
         }
-        let name = localized_display_name(folder_path)
-            .unwrap_or_else(|| folder_name(&folder_path.to_string()));
-        self.cache.insert(folder_path.to_string(), name.clone());
+        let name = localized_display_name(folder_path).unwrap_or_else(|| folder_name(folder_path));
+        cache
+            .borrow_mut()
+            .insert(folder_path.to_string(), name.clone());
         name
-    }
+    })
 }
 
 fn folder_name(path: &str) -> String {
@@ -194,7 +194,6 @@ fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<Path
         );
     };
 
-    let mut localizer = FolderLocalizer::new();
     let mut components = Vec::new();
 
     // Everything between "<root>/Applications/" and "<Name>.app" is folders.
@@ -207,7 +206,7 @@ fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<Path
         }
         walked.push('/');
         walked.push_str(seg);
-        components.push(PathComponent::new(localizer.localized(&walked)));
+        components.push(PathComponent::new(localized_folder(&walked)));
     }
     components.push(PathComponent::new(app_display_name.to_string()));
 
