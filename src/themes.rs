@@ -251,14 +251,16 @@ pub fn load_theme_file(path: &std::path::Path) -> anyhow::Result<UserTheme> {
     let source = std::fs::read_to_string(path)?;
 
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH,
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::JIT,
         Default::default(),
     )?;
-    let table: Table = lua
-        .load(&source)
-        .set_name(stem.clone())
-        .eval()
-        .map_err(|e| anyhow::anyhow!("chunk must return a theme table: {e}"))?;
+    // Themes are arbitrary Lua too: a runaway chunk used to hang startup
+    // before the tray or the global hotkey existed. Bound it like plugins.
+    crate::lua_budget::disable_jit(&lua);
+    let table: Table = crate::lua_budget::with_budget(&lua, || {
+        lua.load(&source).set_name(stem.clone()).eval()
+    })
+    .map_err(|e| anyhow::anyhow!("chunk must return a theme table: {e}"))?;
 
     let name: Option<String> = table.get("name").ok();
     let mut theme = UserTheme {
@@ -458,6 +460,24 @@ mod tests {
         );
         assert!(theme.light.text_primary.is_none());
         assert!(theme.light.accent_ok.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runaway_theme_is_rejected_without_hanging() {
+        let dir = std::env::temp_dir().join("touchery-theme-runaway-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runaway.lua");
+        std::fs::write(&path, "while true do end").unwrap();
+
+        let started = std::time::Instant::now();
+        let err = load_theme_file(&path).unwrap_err().to_string();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "theme loading must not hang startup"
+        );
+        assert!(err.contains("theme table"), "unexpected error: {err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
