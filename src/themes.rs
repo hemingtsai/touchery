@@ -52,7 +52,7 @@ pub struct PartialPalette {
 }
 
 impl PartialPalette {
-    fn set(&mut self, key: &str, value: Hsla) -> bool {
+    fn set(&mut self, key: &str, value: Hsla) {
         match key {
             "card_bg" => self.card_bg = Some(value),
             "card_border" => self.card_border = Some(value),
@@ -66,9 +66,27 @@ impl PartialPalette {
             "accent_info" => self.accent_info = Some(value),
             "accent_ok" => self.accent_ok = Some(value),
             "accent_error" => self.accent_error = Some(value),
-            _ => return false,
+            _ => unreachable!("set() is only called for known keys"),
         }
-        true
+    }
+
+    /// Whether `key` is one of the themeable colors.
+    fn accepts(key: &str) -> bool {
+        matches!(
+            key,
+            "card_bg"
+                | "card_border"
+                | "panel_bg"
+                | "row_bg"
+                | "hover_bg"
+                | "input_bg"
+                | "input_border"
+                | "text_primary"
+                | "text_secondary"
+                | "accent_info"
+                | "accent_ok"
+                | "accent_error"
+        )
     }
 
     fn apply_to(&self, p: &mut Palette) {
@@ -187,16 +205,38 @@ fn parse_hex(s: &str) -> anyhow::Result<Hsla> {
     Ok(gpui::rgba(rgba).into())
 }
 
-fn parse_mode_table(table: &Table) -> anyhow::Result<PartialPalette> {
+/// Parse one `light`/`dark` table. Unknown keys and invalid values are logged
+/// and skipped: the documented contract is that one bad entry never discards
+/// the other keys, let alone the whole theme.
+fn parse_mode_table(table: &Table, stem: &str, mode: &str) -> PartialPalette {
     let mut partial = PartialPalette::default();
-    for pair in table.pairs::<String, String>() {
-        let (key, raw) = pair?;
-        let value = parse_hex(&raw)?;
-        if !partial.set(&key, value) {
-            eprintln!("[theme] ignoring unknown color key `{key}`");
+    for pair in table.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = match pair {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("[theme:{stem}] cannot iterate the `{mode}` table: {e}");
+                break;
+            }
+        };
+        let mlua::Value::String(key) = key else {
+            eprintln!("[theme:{stem}] ignoring a non-string key in `{mode}`");
+            continue;
+        };
+        let key = key.to_string_lossy();
+        if !PartialPalette::accepts(&key) {
+            eprintln!("[theme:{stem}] ignoring unknown color key `{key}`");
+            continue;
+        }
+        let mlua::Value::String(raw) = value else {
+            eprintln!("[theme:{stem}] ignoring {mode}.{key}: expected a '#rrggbb' string");
+            continue;
+        };
+        match parse_hex(&raw.to_string_lossy()) {
+            Ok(value) => partial.set(&key, value),
+            Err(e) => eprintln!("[theme:{stem}] ignoring {mode}.{key}: {e}"),
         }
     }
-    Ok(partial)
+    partial
 }
 
 /// Load one theme file. The chunk must `return { name?, light?, dark? }`.
@@ -230,7 +270,7 @@ pub fn load_theme_file(path: &std::path::Path) -> anyhow::Result<UserTheme> {
 
     for (mode_key, target) in [("light", &mut theme.light), ("dark", &mut theme.dark)] {
         match table.get::<Option<Table>>(mode_key)? {
-            Some(t) => *target = parse_mode_table(&t)?,
+            Some(t) => *target = parse_mode_table(&t, &theme.stem, mode_key),
             None => eprintln!(
                 "[theme:{}] no `{mode_key}` table; falling back to built-in",
                 theme.stem
@@ -388,6 +428,38 @@ mod tests {
         assert!(theme.light.accent_error.is_some());
         assert!(theme.light.text_primary.is_none()); // falls back
         assert!(theme.dark.is_empty()); // whole-mode fallback
+    }
+
+    #[test]
+    fn invalid_entries_do_not_discard_the_rest_of_the_theme() {
+        let dir = std::env::temp_dir().join("touchery-theme-tolerance-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tolerant.lua");
+        std::fs::write(
+            &path,
+            r##"
+            return {
+                light = {
+                    card_bg = "#123456",
+                    text_primary = "bad-color",
+                    not_a_color_key = "#ffffff",
+                    accent_ok = 42,
+                },
+            }
+            "##,
+        )
+        .unwrap();
+
+        let theme = load_theme_file(&path).unwrap();
+        assert_eq!(
+            theme.light.card_bg,
+            Some(parse_hex("#123456").unwrap()),
+            "valid colors must survive neighbouring mistakes"
+        );
+        assert!(theme.light.text_primary.is_none());
+        assert!(theme.light.accent_ok.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
