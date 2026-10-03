@@ -1,5 +1,12 @@
 use crate::apps::{AppEntry, PathComponent};
 
+/// Case-insensitive character comparison covering non-ASCII letters as well
+/// ("É" vs "é"). `char::eq_ignore_ascii_case` alone would miss those, while
+/// app names are lowercased with the full Unicode mapping at index time.
+fn chars_eq_ignore_case(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
 /// Fuzzy subsequence scorer. Higher is better; None means no match.
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
     if query.is_empty() {
@@ -13,7 +20,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
     let mut prev_matched = false;
 
     while qi < q.len() && ti < t.len() {
-        if q[qi].eq_ignore_ascii_case(&t[ti]) {
+        if chars_eq_ignore_case(q[qi], t[ti]) {
             if prev_matched {
                 score += 10; // consecutive bonus
             }
@@ -176,6 +183,18 @@ mod tests {
         }
         // Non-matching query stays empty.
         assert!(search_apps("zzzz", &apps).is_empty());
+    }
+
+    #[test]
+    fn unicode_case_insensitive_match() {
+        let mut app =
+            crate::apps::AppEntry::new("Ecole".into(), "/Applications/Ecole.app".into());
+        app.display_name_lower = "école".into();
+        let apps = vec![app];
+
+        for query in ["é", "É", "ÉCOLE", "éco"] {
+            assert_eq!(search_apps(query, &apps).len(), 1, "query {query} should hit école");
+        }
     }
 
     #[test]
