@@ -7,6 +7,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::{IndexPath, Sizable as _};
 use crate::{themes, ui_theme::*};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 actions!(launcher, [LauncherCancel]);
@@ -39,6 +40,12 @@ pub struct LauncherView {
     /// refresh loop below must be owned by the view rather than by a local
     /// binding that dies when `new` returns.
     _app_refresh_task: Task<()>,
+    /// Pending plugin query. Replacing it drops — and therefore cancels — the
+    /// query it supersedes, instead of letting every keystroke queue work.
+    plugin_query_task: Option<Task<()>>,
+    /// Bumped on every query change. A debounced query that finds the value
+    /// changed while it waited does no work at all.
+    plugin_query_generation: Arc<AtomicUsize>,
 }
 
 pub struct LauncherDelegate {
@@ -252,6 +259,8 @@ impl LauncherView {
             _list_subscription: list_subscription,
             _sub_input_subscription: sub_input_subscription,
             _app_refresh_task: app_refresh_task,
+            plugin_query_task: None,
+            plugin_query_generation: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -277,20 +286,39 @@ impl LauncherView {
         });
 
         if !prefix_mode {
+            // No longer a plugin query: cancel whatever is still pending so it
+            // does not execute plugins or overwrite the app results.
+            self.plugin_query_generation.fetch_add(1, Ordering::SeqCst);
+            self.plugin_query_task = None;
             return;
         }
 
         // Prefix routing: debounce, then query all enabled plugins in the
-        // background and merge results when they are still current.
+        // background and merge results when they are still current. Every new
+        // keystroke supersedes the previous query: its task is dropped here
+        // (cancelling it) and its generation token goes stale.
         let rest = query[PLUGIN_PREFIX.len()..].trim().to_string();
         let pm = crate::plugin_manager(cx);
         let list = self.list.clone();
         let window_handle = window.window_handle();
 
-        cx.spawn(async move |_launcher, cx| {
+        let generation_tracker = self.plugin_query_generation.clone();
+        let token = generation_tracker.fetch_add(1, Ordering::SeqCst) + 1;
+        let is_current = {
+            let generation_tracker = generation_tracker.clone();
+            move || generation_tracker.load(Ordering::SeqCst) == token
+        };
+
+        let query_task = cx.spawn(async move |_launcher, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
+
+            // A newer keystroke arrived while debouncing: skip the plugin call
+            // entirely (a slow plugin would otherwise build a serial backlog).
+            if !is_current() {
+                return;
+            }
 
             let results = cx.background_executor().spawn(async move {
                 let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
@@ -310,6 +338,10 @@ impl LauncherView {
             })
             .await;
 
+            if !is_current() {
+                return;
+            }
+
             let _ = window_handle.update(cx, |_view, window, cx| {
                 let _ = list.update(cx, |state, cx| {
                     let delegate = state.delegate_mut();
@@ -323,8 +355,9 @@ impl LauncherView {
                     cx.notify();
                 });
             });
-        })
-        .detach();
+        });
+
+        self.plugin_query_task = Some(query_task);
     }
 
     /// Move the list selection by ±1 with wrap-around (arrow keys).
