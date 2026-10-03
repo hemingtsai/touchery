@@ -14,8 +14,11 @@ pub enum AppEvent {
     Created(String),
     /// An existing .app bundle was removed/uninstalled.
     Removed(String),
-    /// An .app bundle was modified (e.g., updated).
+    /// An .app bundle was modified (updated, renamed or moved).
     Modified(String),
+    /// The stream lost events or reported an incomplete view; the caller must
+    /// rebuild the whole index rather than trust individual paths.
+    Rescan,
 }
 
 /// Watches the /Applications directories for new/removed/modified apps.
@@ -92,20 +95,28 @@ impl AppWatcher {
 
     /// Convert an FSEvent to our AppEvent type, filtering out non-app events.
     fn convert_event(event: Event) -> Option<AppEvent> {
-        let path = event.path.clone();
-
-        // Only care about .app bundles
-        if !path.ends_with(".app") {
-            return None;
+        // A dropped or incomplete stream means the individual paths can no
+        // longer be trusted; ask for a full rebuild instead of guessing.
+        if event.flag.intersects(
+            StreamFlags::USER_DROPPED | StreamFlags::KERNEL_DROPPED | StreamFlags::MUST_SCAN_SUBDIRS,
+        ) {
+            return Some(AppEvent::Rescan);
         }
+
+        // Renames arrive as ITEM_RENAMED on the old path, and updates inside a
+        // bundle (Contents/Info.plist) point below the bundle. Both must be
+        // attributed to the bundle the index knows.
+        let bundle = app_bundle_root(&event.path)?;
 
         // Determine event type from flags
         if event.flag.contains(StreamFlags::ITEM_CREATED) {
-            Some(AppEvent::Created(path))
+            Some(AppEvent::Created(bundle))
         } else if event.flag.contains(StreamFlags::ITEM_REMOVED) {
-            Some(AppEvent::Removed(path))
-        } else if event.flag.contains(StreamFlags::ITEM_MODIFIED) {
-            Some(AppEvent::Modified(path))
+            Some(AppEvent::Removed(bundle))
+        } else if event.flag.contains(StreamFlags::ITEM_RENAMED)
+            || event.flag.contains(StreamFlags::ITEM_MODIFIED)
+        {
+            Some(AppEvent::Modified(bundle))
         } else {
             None
         }
@@ -120,5 +131,79 @@ impl AppWatcher {
 impl Drop for AppWatcher {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// The `.app` bundle a path belongs to: the path itself when it names a
+/// bundle, otherwise its nearest `.app` ancestor.
+fn app_bundle_root(path: &str) -> Option<String> {
+    let mut current = Path::new(path);
+    loop {
+        if current.extension().is_some_and(|ext| ext == "app") {
+            return Some(current.to_string_lossy().into_owned());
+        }
+        current = current.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(path: &str, flag: StreamFlags) -> Event {
+        Event {
+            event_id: 0,
+            flag,
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn renames_are_reported_against_the_bundle() {
+        // A rename arrives as ITEM_RENAMED only: no created/removed/modified.
+        let renamed = AppWatcher::convert_event(event("/Applications/Final.app", StreamFlags::ITEM_RENAMED));
+        assert_eq!(
+            renamed,
+            Some(AppEvent::Modified("/Applications/Final.app".into()))
+        );
+    }
+
+    #[test]
+    fn updates_inside_a_bundle_map_to_the_bundle() {
+        let event = AppWatcher::convert_event(event(
+            "/Applications/Final.app/Contents/Info.plist",
+            StreamFlags::ITEM_MODIFIED,
+        ));
+        assert_eq!(
+            event,
+            Some(AppEvent::Modified("/Applications/Final.app".into()))
+        );
+    }
+
+    #[test]
+    fn dropped_events_ask_for_a_full_rescan() {
+        assert_eq!(
+            AppWatcher::convert_event(event("/Applications", StreamFlags::USER_DROPPED)),
+            Some(AppEvent::Rescan)
+        );
+        assert_eq!(
+            AppWatcher::convert_event(event(
+                "/Applications/Some.app",
+                StreamFlags::KERNEL_DROPPED | StreamFlags::MUST_SCAN_SUBDIRS
+            )),
+            Some(AppEvent::Rescan)
+        );
+    }
+
+    #[test]
+    fn unrelated_paths_are_ignored() {
+        assert_eq!(
+            AppWatcher::convert_event(event("/Applications/notes.txt", StreamFlags::ITEM_MODIFIED)),
+            None
+        );
+        assert_eq!(
+            AppWatcher::convert_event(event("/Applications/Foo.app", StreamFlags::NONE)),
+            None
+        );
     }
 }
