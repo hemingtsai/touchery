@@ -3,6 +3,11 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::GlobalHotKeyManager;
 use std::str::FromStr as _;
 
+/// Modifiers that make a keystroke safe to capture globally. Shift is a
+/// modifier too, but on its own it only distinguishes "a" from "A".
+const COMMAND_MODIFIERS: Modifiers =
+    Modifiers::SUPER.union(Modifiers::CONTROL).union(Modifiers::ALT);
+
 pub fn default_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
 }
@@ -87,6 +92,11 @@ pub fn hotkey_from_config(hc: &HotkeyConfig) -> anyhow::Result<HotKey> {
     if mods.is_empty() {
         anyhow::bail!("at least one modifier (⌘/⌥/⌃/⇧) is required");
     }
+    // Shift alone is not a shortcut: it would register plain upper-case typing
+    // as a global hotkey, swallowing that keystroke in every other app.
+    if !mods.intersects(COMMAND_MODIFIERS) {
+        anyhow::bail!("at least one of ⌘/⌥/⌃ is required; ⇧ alone captures normal typing");
+    }
     let code = parse_code(&hc.key).ok_or_else(|| anyhow::anyhow!("unsupported key: {}", hc.key))?;
     Ok(HotKey::new(Some(mods), code))
 }
@@ -125,4 +135,45 @@ pub fn format_hotkey(hc: &HotkeyConfig) -> String {
     };
     out.push_str(&display);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(mods: &[&str], key: &str) -> HotkeyConfig {
+        HotkeyConfig {
+            mods: mods.iter().map(|m| (*m).to_string()).collect(),
+            key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn shift_alone_is_not_a_global_shortcut() {
+        let error = hotkey_from_config(&config(&["shift"], "a")).unwrap_err();
+        assert!(error.to_string().contains("⌘/⌥/⌃"), "{error}");
+        assert!(hotkey_from_config(&config(&["shift", "shift"], "space")).is_err());
+    }
+
+    #[test]
+    fn command_modifiers_are_accepted() {
+        for mods in [
+            vec!["super"],
+            vec!["ctrl"],
+            vec!["alt"],
+            vec!["super", "shift"],
+            vec!["ctrl", "alt", "shift"],
+        ] {
+            assert!(
+                hotkey_from_config(&config(&mods, "space")).is_ok(),
+                "{mods:?} must be usable"
+            );
+        }
+    }
+
+    #[test]
+    fn no_modifier_and_unknown_names_are_rejected() {
+        assert!(hotkey_from_config(&config(&[], "space")).is_err());
+        assert!(hotkey_from_config(&config(&["hyper"], "space")).is_err());
+    }
 }

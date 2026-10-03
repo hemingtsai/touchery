@@ -139,10 +139,13 @@ impl SettingsView {
             mods.push("ctrl".to_string());
         }
 
-        // Require at least one modifier so the global shortcut never swallows
-        // plain typing.
-        if mods.is_empty() {
-            self.saved_at = Some("需要至少一个修饰键 (⌘/⌥/⌃)".to_string());
+        // Require at least one command modifier: shift-only combinations would
+        // register ordinary upper-case typing as a global shortcut.
+        if !(keystroke.modifiers.platform
+            || keystroke.modifiers.alt
+            || keystroke.modifiers.control)
+        {
+            self.saved_at = Some("需要至少一个 ⌘/⌥/⌃（仅 ⇧ 会拦截普通输入）".to_string());
             cx.notify();
             return;
         }
