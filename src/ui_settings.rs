@@ -519,6 +519,12 @@ impl Render for SettingsView {
                         .text_size(px(12.0))
                         .text_color(pal.accent_info)
                         .child(msg)
+                }))
+                .children(crate::hotkey_error(cx).map(|msg| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(pal.accent_error)
+                        .child(msg)
                 })),
         );
 

@@ -7,21 +7,14 @@ pub fn default_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
 }
 
-pub struct HotkeyState {
-    pub id: u32,
-    #[allow(dead_code)]
-    pub manager: GlobalHotKeyManager,
-}
-
-impl HotkeyState {
-    pub fn register(hotkey: HotKey) -> anyhow::Result<Self> {
-        let manager = GlobalHotKeyManager::new()?;
-        manager.register(hotkey)?;
-        Ok(Self {
-            id: hotkey.id(),
-            manager,
-        })
-    }
+/// Create the process-wide hotkey manager.
+///
+/// macOS only allows the event handler to be installed once per process, so
+/// the manager is created once and reused by every later (re)registration from
+/// the control panel. Returning it separately from registration lets the app
+/// survive a hotkey that another application already owns.
+pub fn create_manager() -> anyhow::Result<GlobalHotKeyManager> {
+    GlobalHotKeyManager::new().map_err(Into::into)
 }
 
 pub fn parse_code(key: &str) -> Option<Code> {

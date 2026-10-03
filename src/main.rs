@@ -56,7 +56,12 @@ struct LauncherWindowState {
     /// unregister/register individual keys on it.
     hotkey_manager: RefCell<Option<global_hotkey::GlobalHotKeyManager>>,
     current_hotkey: RefCell<Option<global_hotkey::hotkey::HotKey>>,
-    hotkey_id: Arc<RwLock<u32>>,
+    /// `None` while no combo is registered (for example because the configured
+    /// one is taken); the poll loop then ignores every hotkey event.
+    hotkey_id: Arc<RwLock<Option<u32>>>,
+    /// Last hotkey registration failure, surfaced in the control panel so the
+    /// user knows why the shortcut does nothing.
+    hotkey_error: RefCell<Option<String>>,
     apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
     /// Flag to notify launcher that apps list was updated.
@@ -102,14 +107,31 @@ fn main() {
         let config = config::Config::load();
         let initial_hotkey = hotkey::hotkey_from_config(&config.hotkey)
             .unwrap_or_else(|_| hotkey::default_hotkey());
-        let hotkey_state = match hotkey::HotkeyState::register(initial_hotkey) {
-            Ok(state) => state,
-            Err(e) => {
-                eprintln!("Failed to register global hotkey: {e}");
-                std::process::exit(1);
-            }
-        };
-        let hotkey_id = Arc::new(RwLock::new(hotkey_state.id));
+
+        // A hotkey that cannot be registered must not abort startup: without a
+        // window there would be no way for the user to pick another combo.
+        // Keep the tray (the only way in) and report the failure in the panel.
+        let (hotkey_manager, initial_hotkey_id, hotkey_error) =
+            match hotkey::create_manager() {
+                Ok(manager) => match manager.register(initial_hotkey) {
+                    Ok(()) => (Some(manager), Some(initial_hotkey.id()), None),
+                    Err(e) => {
+                        eprintln!("Failed to register global hotkey: {e}");
+                        (
+                            Some(manager),
+                            None,
+                            Some(format!(
+                                "快捷键注册失败: {e} — 可能被其他应用占用，请在下方重新录制"
+                            )),
+                        )
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to create the global hotkey manager: {e}");
+                    (None, None, Some(format!("无法初始化全局快捷键: {e}")))
+                }
+            };
+        let hotkey_id = Arc::new(RwLock::new(initial_hotkey_id));
 
         let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
         let plugin_manager = Arc::new(std::sync::Mutex::new(plugins::PluginManager {
@@ -136,9 +158,10 @@ fn main() {
             launcher_window: RefCell::new(None),
             settings_window: RefCell::new(None),
             _tray: RefCell::new(tray),
-            hotkey_manager: RefCell::new(Some(hotkey_state.manager)),
-            current_hotkey: RefCell::new(Some(initial_hotkey)),
+            hotkey_manager: RefCell::new(hotkey_manager),
+            current_hotkey: RefCell::new(initial_hotkey_id.map(|_| initial_hotkey)),
             hotkey_id: hotkey_id.clone(),
+            hotkey_error: RefCell::new(hotkey_error),
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
             apps_updated: apps_updated.clone(),
@@ -255,6 +278,9 @@ fn main() {
                     continue;
                 }
                 let current_id = *hotkey_id.read().unwrap_or_else(|e| e.into_inner());
+                let Some(current_id) = current_id else {
+                    continue; // no combo is registered
+                };
                 if event.id != current_id {
                     continue;
                 }
@@ -473,12 +499,27 @@ pub fn apply_hotkey(cx: &mut App, hk: global_hotkey::hotkey::HotKey) -> anyhow::
     if let Some(old) = previous {
         let _ = manager.unregister(old);
     }
-    manager.register(hk)?;
+    if let Err(e) = manager.register(hk) {
+        // Nothing is registered now; record why so the panel can explain it.
+        *global.hotkey_error.borrow_mut() = Some(format!("快捷键注册失败: {e}"));
+        *global.hotkey_id.write().unwrap_or_else(|e| e.into_inner()) = None;
+        return Err(e.into());
+    }
 
-    *global.hotkey_id.write().unwrap_or_else(|e| e.into_inner()) = hk.id();
+    *global.hotkey_id.write().unwrap_or_else(|e| e.into_inner()) = Some(hk.id());
     drop(slot);
     *global.current_hotkey.borrow_mut() = Some(hk);
+    *global.hotkey_error.borrow_mut() = None;
     Ok(())
+}
+
+/// The last hotkey registration failure, if the shortcut is currently not
+/// working. Shown in the control panel next to the shortcut row.
+pub fn hotkey_error(cx: &App) -> Option<String> {
+    cx.global::<LauncherWindowState>()
+        .hotkey_error
+        .borrow()
+        .clone()
 }
 
 /// Best-effort re-registration of the configured hotkey; used when a new
