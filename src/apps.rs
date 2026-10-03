@@ -310,7 +310,7 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
         .args(["-attr", "kMDItemDisplayName", QUERY])
         .output();
 
-    let mut entries: Vec<AppEntry> = match output {
+    let entries: Vec<AppEntry> = match output {
         Ok(o) if o.status.success() && !o.stdout.is_empty() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             stdout
@@ -337,17 +337,39 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
         }
     };
 
-    // Sort by the visible (localized) name, then deduplicate by path and
-    // display name. Use a HashSet for reliable path-based dedup (dedup_by
-    // only catches adjacent elements).
-    entries.sort_by(|a, b| a.display_name_lower.cmp(&b.display_name_lower));
-    let mut seen_paths: HashSet<String> = HashSet::new();
-    let mut seen_names: HashSet<String> = HashSet::new();
-    entries.retain(|e| {
-        let path_dup = !seen_paths.insert(e.path.clone());
-        let name_dup = !seen_names.insert(e.display_name_lower.clone());
-        !path_dup && !name_dup
+    dedup_entries(entries)
+}
+
+/// Collapse the raw enumeration into the searchable index.
+///
+/// Two rules, in order:
+/// 1. an exact duplicate path is always dropped (Spotlight can report the
+///    same bundle twice);
+/// 2. a same-named copy that is *not* installed under an Applications root is
+///    dropped when an installed copy exists. Otherwise the copy in Downloads
+///    can win the sort, the real app is filtered away by the apps-only mode
+///    and the launcher is left with an installer while the installed app is
+///    unreachable.
+///
+/// Copies that are all installed, or all outside an Applications root, are
+/// kept: different bundles can legitimately share a display name.
+fn dedup_entries(mut entries: Vec<AppEntry>) -> Vec<AppEntry> {
+    entries.sort_by(|a, b| {
+        a.display_name_lower
+            .cmp(&b.display_name_lower)
+            .then_with(|| b.in_app_dir.cmp(&a.in_app_dir))
     });
+
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    entries.retain(|e| seen_paths.insert(e.path.clone()));
+
+    let installed_names: HashSet<String> = entries
+        .iter()
+        .filter(|e| e.in_app_dir)
+        .map(|e| e.display_name_lower.clone())
+        .collect();
+    entries.retain(|e| e.in_app_dir || !installed_names.contains(&e.display_name_lower));
+
     entries
 }
 
@@ -386,6 +408,37 @@ mod tests {
         let (_, in_app_dir) =
             build_path_components("/usr/libexec/SomeHelper.app", "SomeHelper");
         assert!(!in_app_dir);
+    }
+
+    #[test]
+    fn installed_copy_survives_dedup() {
+        let stray = AppEntry::with_display_name(
+            "Foo".into(),
+            "/Users/me/Downloads/Foo.app".into(),
+            Some("Foo".into()),
+        );
+        let installed = AppEntry::with_display_name(
+            "Foo".into(),
+            "/Applications/Foo.app".into(),
+            Some("Foo".into()),
+        );
+
+        // The stray copy must not shadow the installed one.
+        let entries = dedup_entries(vec![stray, installed.clone()]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/Applications/Foo.app");
+        assert!(entries[0].in_app_dir, "apps-only mode must still find it");
+
+        // Two installed copies are legitimately different bundles.
+        let nested = AppEntry::with_display_name(
+            "Foo".into(),
+            "/Applications/Utilities/Foo.app".into(),
+            Some("Foo".into()),
+        );
+        assert_eq!(dedup_entries(vec![installed.clone(), nested]).len(), 2);
+
+        // Exact duplicate paths still collapse.
+        assert_eq!(dedup_entries(vec![installed.clone(), installed]).len(), 1);
     }
 
     #[test]
