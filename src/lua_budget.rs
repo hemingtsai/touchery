@@ -1,27 +1,32 @@
 //! Execution guards shared by every Lua entry point in the app.
 //!
 //! Plugins and themes are user-authored scripts executed in-process, so each
-//! call is bounded by an instruction budget *and* a wall-clock deadline. The
-//! deadline is checked from a debug hook, and only the interpreter delivers
-//! those: LuaJIT compiles hot loops into machine code where no count hook
-//! fires, so a `while true do end` would otherwise run forever. Turning the
-//! JIT compiler off first is what makes the budget real; the shared `Lua`
-//! mutex then keeps that one runaway script from taking the rest of the UI
-//! with it.
+//! call is bounded by an instruction budget and, as a backstop, by a wall-clock
+//! deadline. The deadline is checked from a debug hook, and only the
+//! interpreter delivers those: LuaJIT compiles hot loops into machine code
+//! where no count hook fires, so a `while true do end` would otherwise run
+//! forever. Turning the JIT compiler off first is what makes the budget real.
 
 use mlua::{HookTriggers, Lua, VmState};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-/// Instructions allowed for one Lua entry point.
+/// Instructions allowed for one Lua entry point. This is the primary bound:
+/// with the JIT off it is machine-independent and cannot be evaded by a plain
+/// loop.
 const INSTRUCTION_BUDGET: u64 = 20_000_000;
 /// How often the watchdog hook runs. Coarse enough to stay cheap, fine enough
-/// that the wall-clock deadline below is honoured promptly.
+/// that the wall-clock backstop below is honoured promptly.
 const HOOK_INTERVAL: u32 = 10_000;
-/// Longest a single Lua call may run, regardless of instruction count. The
-/// length of the call is not otherwise bounded: the same script runs much
-/// faster on a faster machine.
-const WALL_CLOCK_BUDGET: Duration = Duration::from_millis(250);
+/// Backstop for machines on which the instruction budget alone would take an
+/// unreasonable amount of time.
+///
+/// It is deliberately generous: a hook only runs between byte-code
+/// instructions, so a plugin that legitimately blocks inside `io`/`os` calls
+/// (which the README advertises) would otherwise be aborted right after the
+/// blocking call returned. Neither limit can interrupt such a call — only
+/// process isolation can — so this must not punish it either.
+const WALL_CLOCK_BUDGET: Duration = Duration::from_secs(5);
 
 /// Turn the JIT compiler off for `lua` and drop the `jit` global so scripts
 /// cannot switch it back on. Byte-code then runs in the interpreter, where
