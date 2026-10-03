@@ -289,4 +289,4 @@ scripts/build_dmg.sh# DMG 打包脚本
 
 ## License
 
-Apache-2.0
+Apache-2.0，全文见 [`LICENSE`](LICENSE)。

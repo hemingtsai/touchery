@@ -2,6 +2,7 @@
 name = "touchery"
 version = "1.2.0-beta"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
