@@ -150,6 +150,12 @@ pub struct UserTheme {
     pub dark: PartialPalette,
 }
 
+/// Config value / file stem reserved for the built-in palette. A user theme
+/// file with this stem would be selectable but could never stay active
+/// (`init` reads the value back as "no user theme"), and its settings row id
+/// would collide with the built-in row.
+pub const BUILTIN_STEM: &str = "builtin";
+
 impl UserTheme {
     pub fn display_name(&self) -> &str {
         if self.name.is_empty() { &self.stem } else { &self.name }
@@ -199,6 +205,9 @@ pub fn load_theme_file(path: &std::path::Path) -> anyhow::Result<UserTheme> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .ok_or_else(|| anyhow::anyhow!("no file stem"))?;
+    if stem == BUILTIN_STEM {
+        anyhow::bail!("`{BUILTIN_STEM}` is reserved for the built-in theme; rename the file");
+    }
     let source = std::fs::read_to_string(path)?;
 
     let lua = Lua::new_with(
@@ -274,7 +283,7 @@ pub fn init(cx: &mut gpui::App) {
     }
 
     let active_stem = match active_from_config {
-        stem if stem == "builtin" => None,
+        stem if stem == BUILTIN_STEM => None,
         stem => user_themes
             .iter()
             .any(|t| &t.stem == &stem)
@@ -317,6 +326,9 @@ pub fn set_active(cx: &mut gpui::App, stem: Option<String>) -> anyhow::Result<()
     {
         let state = cx.global_mut::<ThemeState>();
         if let Some(stem) = &stem {
+            if stem == BUILTIN_STEM {
+                anyhow::bail!("`{BUILTIN_STEM}` is reserved for the built-in theme");
+            }
             if !state.user_themes.iter().any(|t| &t.stem == stem) {
                 anyhow::bail!("unknown theme: {stem}");
             }
@@ -325,7 +337,7 @@ pub fn set_active(cx: &mut gpui::App, stem: Option<String>) -> anyhow::Result<()
         state.active_stem = stem.clone();
     }
     let result = crate::config::modify(|config| {
-        config.theme = stem.unwrap_or_else(|| "builtin".to_string());
+        config.theme = stem.unwrap_or_else(|| BUILTIN_STEM.to_string());
     });
     if let Err(e) = result {
         // Rollback global state on save failure.
@@ -376,6 +388,19 @@ mod tests {
         assert!(theme.light.accent_error.is_some());
         assert!(theme.light.text_primary.is_none()); // falls back
         assert!(theme.dark.is_empty()); // whole-mode fallback
+    }
+
+    #[test]
+    fn reserved_builtin_stem_is_rejected() {
+        let dir = std::env::temp_dir().join("touchery-theme-reserved-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("builtin.lua");
+        std::fs::write(&path, r##"return { light = { card_bg = "#123456" } }"##).unwrap();
+
+        let err = load_theme_file(&path).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
