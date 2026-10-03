@@ -142,23 +142,29 @@ impl Plugin {
     }
 
     pub fn run(&mut self, value: &str, query: &str) {
-        self.run_impl(|run_fn| run_fn.call::<()>((value.to_string(), query.to_string())))
-    }
-
-    pub fn run_sub(&mut self, value: &str, sub_query: &str) {
-        self.run_impl(|run_fn| run_fn.call::<()>((value.to_string(), sub_query.to_string())))
-    }
-
-    fn run_impl(&mut self, f: impl FnOnce(Function) -> mlua::Result<()>) {
-        let Some(lua) = self.lua.as_ref() else {
-            return;
-        };
         let Some(run_fn) = self.run_fn.clone() else {
             return;
         };
-        if let Err(e) = Self::with_budget(lua, || f(run_fn)) {
-            eprintln!("[plugin:{}] run error: {e}", self.name);
-            self.error = Some(format!("run 失败: {e}"));
+        self.run_impl("run", run_fn, value, query);
+    }
+
+    pub fn run_sub(&mut self, value: &str, sub_query: &str) {
+        let Some(run_sub_fn) = self.run_sub_fn.clone() else {
+            return;
+        };
+        self.run_impl("run_sub", run_sub_fn, value, sub_query);
+    }
+
+    fn run_impl(&mut self, handler: &str, run_fn: Function, value: &str, query: &str) {
+        let Some(lua) = self.lua.as_ref() else {
+            return;
+        };
+        let result = Self::with_budget(lua, || {
+            run_fn.call::<()>((value.to_string(), query.to_string()))
+        });
+        if let Err(e) = result {
+            eprintln!("[plugin:{}] {handler} error: {e}", self.name);
+            self.error = Some(format!("{handler} 失败: {e}"));
         }
     }
 
@@ -272,5 +278,48 @@ impl PluginManager {
             plugin.unload();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_sub_dispatches_to_the_secondary_handler() {
+        let dir = std::env::temp_dir().join("touchery-plugin-dispatch-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("out.txt");
+        let _ = std::fs::remove_file(&log);
+        let plugin_path = dir.join("dispatch.lua");
+        std::fs::write(
+            &plugin_path,
+            format!(
+                r##"
+                local LOG = "{log}"
+                local function write(line)
+                    local f = assert(io.open(LOG, "a"))
+                    f:write(line .. "\n")
+                    f:close()
+                end
+                function get_items(query) return {{}} end
+                function run(value, query) write("run:" .. value .. ":" .. query) end
+                function run_sub(value, sub_query) write("run_sub:" .. value .. ":" .. sub_query) end
+                "##,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+
+        let mut plugin = Plugin::load(&plugin_path).unwrap();
+        plugin.run("v", "q");
+        plugin.run_sub("v", "s");
+
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "run:v:q\nrun_sub:v:s\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
