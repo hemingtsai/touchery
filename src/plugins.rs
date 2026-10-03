@@ -100,6 +100,13 @@ impl Plugin {
         self.enabled && self.lua.is_some() && self.get_items_fn.is_some()
     }
 
+    /// Whether a Lua runtime is currently loaded for this plugin, regardless
+    /// of whether the user has it enabled. A disabled plugin keeps its row in
+    /// the manager (metadata only) without a runtime.
+    pub fn runtime_loaded(&self) -> bool {
+        self.lua.is_some()
+    }
+
     pub fn query(&mut self, query: &str) -> Vec<PluginItem> {
         let Some(lua) = self.lua.as_ref() else {
             return Vec::new();

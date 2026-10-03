@@ -19,10 +19,12 @@ pub struct SettingsView {
 }
 
 /// Snapshot row of a plugin for rendering.
+#[derive(PartialEq)]
 struct PluginRowView {
     file_name: String,
     name: String,
     enabled: bool,
+    /// Whether a Lua runtime is loaded for this plugin right now.
     loaded: bool,
     error: Option<String>,
 }
@@ -220,7 +222,7 @@ impl SettingsView {
                 file_name: p.file_name.clone(),
                 name: p.name.clone(),
                 enabled: p.enabled,
-                loaded: p.available(),
+                loaded: p.runtime_loaded(),
                 error: p.error.clone(),
             })
             .collect()
@@ -237,12 +239,12 @@ impl SettingsView {
 
         let status_text = if let Some(err) = &plugin.error {
             format!("出错: {err}")
+        } else if !plugin.enabled {
+            "已停用".to_string()
         } else if !plugin.loaded {
             "未加载".to_string()
-        } else if plugin.enabled {
-            "运行中".to_string()
         } else {
-            "已停用".to_string()
+            "运行中".to_string()
         };
         let status_color = if plugin.error.is_some() {
             pal.accent_error
