@@ -62,7 +62,9 @@ struct LauncherWindowState {
     /// Last hotkey registration failure, surfaced in the control panel so the
     /// user knows why the shortcut does nothing.
     hotkey_error: RefCell<Option<String>>,
-    apps_index: Arc<RwLock<Vec<apps::AppEntry>>>,
+    /// The index is behind an `Arc` so re-indexing swaps it wholesale and
+    /// readers clone a pointer instead of every prepared search key.
+    apps_index: Arc<RwLock<Arc<Vec<apps::AppEntry>>>>,
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
     /// Flag to notify launcher that apps list was updated.
     apps_updated: Arc<AtomicBool>,
@@ -133,7 +135,8 @@ fn main() {
             };
         let hotkey_id = Arc::new(RwLock::new(initial_hotkey_id));
 
-        let apps_index: Arc<RwLock<Vec<apps::AppEntry>>> = Arc::new(RwLock::new(Vec::new()));
+        let apps_index: Arc<RwLock<Arc<Vec<apps::AppEntry>>>> =
+            Arc::new(RwLock::new(Arc::new(Vec::new())));
         let plugin_manager = Arc::new(std::sync::Mutex::new(plugins::PluginManager {
             plugins: Vec::new(),
         }));
@@ -182,7 +185,7 @@ fn main() {
         cx.background_executor()
             .spawn(async move {
                 let entries = apps::enumerate_apps();
-                *index_ref.write().unwrap_or_else(|e| e.into_inner()) = entries;
+                *index_ref.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(entries);
                 // Raise the same flag every later re-index uses, so a launcher
                 // opened before the first scan finishes still picks it up.
                 index_published.store(true, Ordering::SeqCst);
@@ -256,7 +259,7 @@ fn main() {
                             .spawn(async move {
                                 let new_entries = apps::enumerate_apps();
                                 *index_ref.write().unwrap_or_else(|e| e.into_inner()) =
-                                    new_entries;
+                                    Arc::new(new_entries);
                                 updated.store(true, Ordering::SeqCst);
                                 busy.store(false, Ordering::SeqCst);
                             })
@@ -460,12 +463,10 @@ pub fn dismiss_launcher(window: &mut Window, cx: &mut App) {
 }
 
 /// Snapshot of the application index (loaded once at startup).
-pub fn app_index(cx: &App) -> Vec<apps::AppEntry> {
-    cx.global::<LauncherWindowState>()
-        .apps_index
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+pub fn app_index(cx: &App) -> Arc<Vec<apps::AppEntry>> {
+    let index = cx.global::<LauncherWindowState>();
+    let guard = index.apps_index.read().unwrap_or_else(|e| e.into_inner());
+    guard.clone()
 }
 
 /// Check if apps index was updated since last check and reset the flag.

@@ -57,6 +57,9 @@ pub struct LauncherDelegate {
     plugin_rows: Vec<Row>,
     last_query: String,
     search_generation: usize,
+    /// "Search applications only": the index is shared between windows, so the
+    /// filter is applied while searching instead of by copying it.
+    apps_only: bool,
 }
 
 impl LauncherDelegate {
@@ -83,7 +86,7 @@ impl LauncherDelegate {
         } else {
             self.plugin_rows.clear();
             self.search_generation += 1;
-            self.app_rows = search_apps(query, &self.apps)
+            self.app_rows = search_apps(query, &self.apps, self.apps_only)
                 .into_iter()
                 .map(|(i, _)| Row::App(i))
                 .collect();
@@ -152,23 +155,23 @@ impl ListDelegate for LauncherDelegate {
 
 impl LauncherView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut all_apps = crate::app_index(cx);
-        // "仅搜索应用程序" mode: restrict to user-facing apps under an
-        // Applications root (/Applications, /System/Applications, ...),
-        // excluding helpers buried in system directories.
+        // "仅搜索应用程序" mode restricts the results to user-facing apps
+        // under an Applications root (/Applications, /System/Applications,
+        // ...), excluding helpers buried in system directories.
+        let all_apps = crate::app_index(cx);
         let apps_only = crate::config::Config::load().apps_only;
-        if apps_only {
-            all_apps.retain(|app| app.in_app_dir);
-        }
-        let all_apps = Arc::new(all_apps);
-        let initial_rows: Vec<Row> = (0..all_apps.len()).map(Row::App).collect();
+        let initial_rows: Vec<Row> = search_apps("", &all_apps, apps_only)
+            .into_iter()
+            .map(|(i, _)| Row::App(i))
+            .collect();
 
         let delegate = LauncherDelegate {
-            apps: all_apps.clone(),
+            apps: all_apps,
             app_rows: initial_rows,
             plugin_rows: Vec::new(),
             last_query: String::new(),
             search_generation: 0,
+            apps_only,
         };
 
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
@@ -228,17 +231,14 @@ impl LauncherView {
             let _ = window_handle.update(cx, |_view, _window, cx| {
                 if crate::check_apps_updated(cx) {
                     // Refresh the apps list
-                    let mut all_apps = crate::app_index(cx);
+                    let all_apps = crate::app_index(cx);
                     let apps_only = crate::config::Config::load().apps_only;
-                    if apps_only {
-                        all_apps.retain(|app| app.in_app_dir);
-                    }
-                    let all_apps = Arc::new(all_apps);
 
                     let _ = list_clone.update(cx, |state, cx| {
                         let delegate = state.delegate_mut();
                         let query = delegate.last_query.clone();
                         delegate.apps = all_apps;
+                        delegate.apps_only = apps_only;
                         delegate.apply_query(&query);
                         let count = delegate.total_count();
                         state.set_selected_index(
@@ -634,6 +634,7 @@ mod tests {
             plugin_rows: Vec::new(),
             last_query: String::new(),
             search_generation: 0,
+            apps_only: false,
         }
     }
 

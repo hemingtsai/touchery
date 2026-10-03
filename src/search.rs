@@ -215,13 +215,17 @@ fn best_key_score(
 
 /// Rank the apps matching `query`; the score is in thousandths of a perfect
 /// match. Entries below the threshold for the query length are omitted, so a
-/// one-character query only lists apps whose word starts with it.
-pub fn search_apps(query: &str, apps: &[AppEntry]) -> Vec<(usize, u32)> {
+/// one-character query only lists apps whose word starts with it. With
+/// `apps_only`, apps outside an Applications root are skipped.
+pub fn search_apps(query: &str, apps: &[AppEntry], apps_only: bool) -> Vec<(usize, u32)> {
+    let wanted = |app: &AppEntry| !apps_only || app.in_app_dir;
+
     let segments = query_segments(query);
     if segments.is_empty() {
         return apps
             .iter()
             .enumerate()
+            .filter(|(_, app)| wanted(app))
             .map(|(index, _)| (index, 0))
             .collect();
     }
@@ -235,6 +239,9 @@ pub fn search_apps(query: &str, apps: &[AppEntry]) -> Vec<(usize, u32)> {
         let mask = query_mask(segment);
         let threshold = threshold_for(segment.len());
         for (index, app) in apps.iter().enumerate() {
+            if !wanted(app) {
+                continue;
+            }
             if let Some((score, key_len)) =
                 best_key_score(segment, mask, &app.keys, threshold, &mut rows)
             {
@@ -246,6 +253,9 @@ pub fn search_apps(query: &str, apps: &[AppEntry]) -> Vec<(usize, u32)> {
         // ancestor folders in order, then the app itself — and an entry scores
         // as badly as its worst segment. Folder keys are only consulted here.
         for (index, app) in apps.iter().enumerate() {
+            if !wanted(app) {
+                continue;
+            }
             let component_count = app.folder_keys.len() + 1;
             let mut cursor = 0usize;
             let mut worst = SCALE;
@@ -307,7 +317,9 @@ mod tests {
 
     fn score(query: &str, entry: &AppEntry) -> Option<u32> {
         let apps = [entry.clone()];
-        search_apps(query, &apps).first().map(|(_, score)| *score)
+        search_apps(query, &apps, false)
+            .first()
+            .map(|(_, score)| *score)
     }
 
     #[test]
@@ -421,7 +433,7 @@ mod tests {
             app("Unsafest", "/Applications/Unsafest.app", "Unsafest"),
             app("Safari", "/Applications/Safari.app", "Safari"),
         ];
-        let hits = search_apps("saf", &apps);
+        let hits = search_apps("saf", &apps, false);
         assert_eq!(hits.len(), 2, "both contain the letters");
         assert_eq!(hits[0].0, 1, "the prefix match must come first");
         assert!(hits[0].1 > hits[1].1);
@@ -433,20 +445,20 @@ mod tests {
         let single = std::slice::from_ref(&app);
 
         // A single segment must not reach an ancestor folder.
-        let hits = search_apps("devtools", single);
+        let hits = search_apps("devtools", single, false);
         assert!(hits.is_empty(), "{hits:?}");
 
         // With a separator the folder is the point of the query.
-        let hits = search_apps("devtools/myapp", single);
+        let hits = search_apps("devtools/myapp", single, false);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 0);
 
         // Order cannot be reversed, and abbreviations work per segment.
-        assert!(search_apps("myapp/devtools", single).is_empty());
-        assert_eq!(search_apps("devtools/ma", single).len(), 1);
-        assert_eq!(search_apps("dev tools/mya", single).len(), 1);
+        assert!(search_apps("myapp/devtools", single, false).is_empty());
+        assert_eq!(search_apps("devtools/ma", single, false).len(), 1);
+        assert_eq!(search_apps("dev tools/mya", single, false).len(), 1);
         // Every segment has to reach its own threshold.
-        assert!(search_apps("devtools/zz", single).is_empty());
+        assert!(search_apps("devtools/zz", single, false).is_empty());
     }
 
     #[test]
@@ -459,9 +471,25 @@ mod tests {
                 "计算器",
             ),
         ];
-        let hits = search_apps("", &apps);
+        let hits = search_apps("", &apps, false);
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|(_, score)| *score == 0));
+    }
+
+    #[test]
+    fn the_apps_only_filter_skips_non_installed_bundles() {
+        let installed = app("Foo", "/Applications/Foo.app", "Foo");
+        let helper = app("Foo Helper", "/usr/libexec/Foo Helper.app", "Foo Helper");
+        let apps = [installed, helper];
+
+        assert_eq!(search_apps("foo", &apps, false).len(), 2);
+        let filtered = search_apps("foo", &apps, true);
+        assert_eq!(filtered.len(), 1, "{filtered:?}");
+        assert_eq!(filtered[0].0, 0);
+        // The empty query goes through the same filter.
+        assert_eq!(search_apps("", &apps, true).len(), 1);
+        // Path queries too.
+        assert_eq!(search_apps("dev/foo", &apps, true).len(), 0);
     }
 
     #[test]
@@ -480,7 +508,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         for query in ["app", "app0420", "yingyong", "yy", "app042", "zzzz"] {
-            let _ = search_apps(query, &apps);
+            let _ = search_apps(query, &apps, false);
         }
         let elapsed = started.elapsed();
         eprintln!("1000 apps x 6 queries: {elapsed:?}");
@@ -490,9 +518,9 @@ mod tests {
         );
 
         // 应用0420 → pinyin "yingyong0420", abbreviation "yy0420"
-        let hits = search_apps("yingyong0420", &apps);
+        let hits = search_apps("yingyong0420", &apps, false);
         assert_eq!(hits[0].0, 420);
-        let hits = search_apps("yy0420", &apps);
+        let hits = search_apps("yy0420", &apps, false);
         assert_eq!(hits[0].0, 420);
     }
 }
