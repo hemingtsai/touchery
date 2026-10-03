@@ -174,9 +174,12 @@ end
 参见 [`examples/hello.lua`](examples/hello.lua)：
 
 ```bash
+mkdir -p ~/Library/Application\ Support/touchery/plugins
 cp examples/hello.lua ~/Library/Application\ Support/touchery/plugins/
 # 重启 touchery 后，唤起启动器输入 "> " 即可看到插件条目
 ```
+
+> 插件目录不会自动创建；目录不存在时不会加载任何插件，插件列表为空。
 
 验证日志写入 `~/Library/Application Support/touchery/plugin.log`。
 
