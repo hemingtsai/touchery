@@ -222,6 +222,12 @@ pub fn search_apps(query: &str, apps: &[AppEntry], apps_only: bool) -> Vec<(usiz
 
     let segments = query_segments(query);
     if segments.is_empty() {
+        // An empty query lists everything, which is how the launcher opens.
+        // A query that merely folds away — Chinese characters, which the
+        // launcher cannot type — must not.
+        if !query.trim().is_empty() {
+            return Vec::new();
+        }
         return apps
             .iter()
             .enumerate()
