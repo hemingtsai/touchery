@@ -33,6 +33,9 @@ pub struct LauncherView {
     list: Entity<ListState<LauncherDelegate>>,
     sub_input: Entity<InputState>,
     mode: Mode,
+    /// Why the last "open" attempt failed, if it did. Shown under the search
+    /// bar so the user can retry instead of the panel closing silently.
+    launch_error: Option<String>,
     _query_subscription: Subscription,
     _list_subscription: Subscription,
     _sub_input_subscription: Subscription,
@@ -255,6 +258,7 @@ impl LauncherView {
             list,
             sub_input,
             mode: Mode::Normal,
+            launch_error: None,
             _query_subscription: query_subscription,
             _list_subscription: list_subscription,
             _sub_input_subscription: sub_input_subscription,
@@ -269,6 +273,7 @@ impl LauncherView {
     }
 
     fn on_query_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.launch_error = None;
         let query = self.query_input.read(cx).value().to_string();
 
         let (generation, prefix_mode) = self.list.update(cx, |state, cx| {
@@ -405,12 +410,43 @@ impl LauncherView {
                 else {
                     return;
                 };
-                std::thread::spawn(move || {
-                    if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
-                        eprintln!("[launcher] failed to open {path}: {e}");
+                self.launch_error = None;
+                let window_handle = window.window_handle();
+                // Launch on the background executor: `open` waits for
+                // LaunchServices, and blocking the UI thread on it would stall
+                // the window. Waiting for the exit status also reaps the child
+                // (dropping a Child leaves a zombie behind) and tells us
+                // whether the bundle really started.
+                cx.spawn(async move |launcher, cx| {
+                    let open_path = path.clone();
+                    let status = cx
+                        .background_executor()
+                        .spawn(async move {
+                            std::process::Command::new("open").arg(&open_path).status()
+                        })
+                        .await;
+
+                    match status {
+                        Ok(status) if status.success() => {
+                            let _ = window_handle.update(cx, |_view, window, cx| {
+                                crate::dismiss_launcher(window, cx);
+                            });
+                        }
+                        Ok(status) => {
+                            let _ = launcher.update(cx, |view, cx| {
+                                view.launch_error = Some(format!("无法打开 {path}: {status}"));
+                                cx.notify();
+                            });
+                        }
+                        Err(e) => {
+                            let _ = launcher.update(cx, |view, cx| {
+                                view.launch_error = Some(format!("无法打开 {path}: {e}"));
+                                cx.notify();
+                            });
+                        }
                     }
-                });
-                crate::dismiss_launcher(window, cx);
+                })
+                .detach();
             }
             Row::Plugin { plugin_name, item } => {
                 if item.sub {
@@ -536,9 +572,21 @@ impl Render for LauncherView {
                                 )
                                 .large(),
                         ),
-                    )
-                    // Results fill the rest of the card.
-                    .child(div().flex_1().min_h_0().child(List::new(&list).w_full().h_full()));
+                    );
+
+                if let Some(error) = self.launch_error.clone() {
+                    root = root.child(
+                        div()
+                            .px_4()
+                            .pb_2()
+                            .text_size(px(12.0))
+                            .text_color(pal.accent_error)
+                            .child(error),
+                    );
+                }
+
+                // Results fill the rest of the card.
+                root = root.child(div().flex_1().min_h_0().child(List::new(&list).w_full().h_full()));
             }
             Mode::SubInput {
                 plugin_name,
