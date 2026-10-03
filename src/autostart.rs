@@ -99,3 +99,29 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plist_path_lives_under_the_user_launch_agents_folder() {
+        let path = plist_path().expect("tests need a home directory");
+        assert_eq!(path.file_name().unwrap(), "com.touchery.app.plist");
+        assert!(path.to_string_lossy().contains("/Library/LaunchAgents/"));
+    }
+
+    #[test]
+    fn executable_paths_are_xml_escaped() {
+        let escaped = xml_escape("/Applications/A&B <Utilities>/Touchery\"s 'app'");
+        assert_eq!(
+            escaped,
+            "/Applications/A&amp;B &lt;Utilities&gt;/Touchery&quot;s &apos;app&apos;"
+        );
+        // The escaped value must not introduce any raw XML delimiter.
+        assert!(
+            !escaped.contains(['<', '>', '"', '\'']),
+            "raw XML delimiters must not survive: {escaped}"
+        );
+    }
+}

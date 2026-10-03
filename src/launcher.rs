@@ -614,3 +614,72 @@ impl Render for LauncherView {
         root
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Imported explicitly rather than via `super::*`: the parent glob-imports
+    // gpui, whose `test` attribute would shadow the built-in one here.
+    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row};
+    use crate::apps::AppEntry;
+    use std::sync::Arc;
+
+    fn app(name: &str, path: &str) -> AppEntry {
+        AppEntry::with_display_name(name.into(), path.into(), Some(name.into()))
+    }
+
+    fn delegate(apps: Vec<AppEntry>) -> LauncherDelegate {
+        LauncherDelegate {
+            apps: Arc::new(apps),
+            app_rows: Vec::new(),
+            plugin_rows: Vec::new(),
+            last_query: String::new(),
+            search_generation: 0,
+        }
+    }
+
+    #[test]
+    fn plain_queries_search_apps_and_clear_plugin_rows() {
+        let mut delegate = delegate(vec![
+            app("Safari", "/Applications/Safari.app"),
+            app("Calculator", "/System/Applications/Calculator.app"),
+        ]);
+        delegate.plugin_rows = vec![Row::Plugin {
+            plugin_name: "hello".into(),
+            item: PluginItem {
+                title: "问候".into(),
+                value: "hello".into(),
+                sub: false,
+            },
+        }];
+
+        let (_, prefix_mode) = delegate.apply_query("saf");
+
+        assert!(!prefix_mode);
+        assert_eq!(delegate.app_rows.len(), 1);
+        assert!(
+            delegate.plugin_rows.is_empty(),
+            "stale plugin rows must not survive an app query"
+        );
+        assert!(matches!(delegate.row_at(0), Some(Row::App(0))));
+    }
+
+    #[test]
+    fn plugin_queries_drop_app_rows_and_bump_the_generation() {
+        let mut delegate = delegate(vec![app("Safari", "/Applications/Safari.app")]);
+
+        let first_query = format!("{PLUGIN_PREFIX} he");
+        let (first, prefix_mode) = delegate.apply_query(&first_query);
+        assert!(prefix_mode);
+        assert_eq!(delegate.last_query, first_query);
+        assert!(
+            delegate.app_rows.is_empty() && delegate.row_at(0).is_none(),
+            "plugin routing must not leave app rows behind"
+        );
+
+        let (second, _) = delegate.apply_query(&format!("{PLUGIN_PREFIX} hello"));
+        assert!(
+            second > first,
+            "every keystroke needs a fresh generation so stale results are dropped"
+        );
+    }
+}
