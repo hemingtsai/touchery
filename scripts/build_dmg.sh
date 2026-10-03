@@ -26,14 +26,37 @@ print(major * 10000 + minor * 100 + patch)
 PY
 )"
 
-STAGING="target/dmg"
+# Respect the target directory Cargo actually uses (CARGO_TARGET_DIR et al.),
+# rather than assuming the default `target/`.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+
+STAGING="$TARGET_DIR/dmg"
 APP_DIR="$STAGING/$APP_NAME.app"
 
 echo "==> Building release binary"
-cargo build --release
+# Ask Cargo where it put the executable instead of assuming target/release:
+# with CARGO_TARGET_DIR or CARGO_BUILD_TARGET set that path is wrong or stale.
+BIN="$(cargo build --release --message-format=json | python3 -c '
+import json, sys
+executable = ""
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    message = json.loads(line)
+    target = message.get("target", {})
+    if message.get("reason") == "compiler-artifact" and message.get("executable") \
+            and target.get("name") == "touchery":
+        executable = message["executable"]
+print(executable)
+')"
+if [ ! -x "$BIN" ]; then
+    echo "error: cargo did not report a touchery executable ('$BIN')" >&2
+    exit 1
+fi
 
 echo "==> Generating icon set"
-ICONSET="target/touchery.iconset"
+ICONSET="$TARGET_DIR/touchery.iconset"
 cargo run --release --example gen_icon -- "$ICONSET" >/dev/null
 
 echo "==> Assembling $APP_NAME.app"
@@ -62,7 +85,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cp target/release/touchery "$APP_DIR/Contents/MacOS/touchery"
+cp "$BIN" "$APP_DIR/Contents/MacOS/touchery"
 chmod +x "$APP_DIR/Contents/MacOS/touchery"
 
 iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/touchery.icns"
@@ -77,7 +100,7 @@ echo "==> Staging DMG contents (app + Applications symlink)"
 ln -sfn /Applications "$STAGING/Applications"
 
 echo "==> Creating DMG"
-DMG="target/touchery-$VERSION.dmg"
+DMG="$TARGET_DIR/touchery-$VERSION.dmg"
 rm -f "$DMG"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
 
