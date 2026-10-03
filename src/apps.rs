@@ -373,15 +373,15 @@ fn collect_bundles(dir: &std::path::Path, depth: usize, out: &mut Vec<AppEntry>)
     };
     for entry in read.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "app") {
-            if path.is_dir() {
-                if let Some(app) = make_entry(path.to_string_lossy().into_owned(), None) {
-                    out.push(app);
-                }
-            }
+        if !path.is_dir() {
             continue;
         }
-        if path.is_dir() {
+        if path.extension().is_some_and(|ext| ext == "app") {
+            // Never descend into a bundle: the apps inside it are helpers.
+            if let Some(app) = make_entry(path.to_string_lossy().into_owned(), None) {
+                out.push(app);
+            }
+        } else {
             collect_bundles(&path, depth + 1, out);
         }
     }
