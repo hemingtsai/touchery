@@ -305,12 +305,11 @@ fn make_entry(path: String, localized: Option<String>) -> Option<AppEntry> {
 pub fn enumerate_apps() -> Vec<AppEntry> {
     // Primary source: Spotlight returns the localized display name in one
     // shot, honoring the user's locale (e.g. "微信" on zh-Hans systems).
-    let output = Command::new("mdfind")
-        .args(["-attr", "kMDItemDisplayName", QUERY])
-        .output();
+    let mut command = Command::new("mdfind");
+    command.args(["-attr", "kMDItemDisplayName", QUERY]);
 
-    let entries: Vec<AppEntry> = match output {
-        Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+    let entries: Vec<AppEntry> = match output_with_timeout(&mut command, MDFIND_TIMEOUT) {
+        Some(o) if o.status.success() && !o.stdout.is_empty() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             stdout
                 .lines()
@@ -321,15 +320,72 @@ pub fn enumerate_apps() -> Vec<AppEntry> {
                 .collect()
         }
         _ => {
-            // Spotlight unavailable/disabled or still empty: walk the known
-            // application roots. Repeating the same mdfind query cannot help —
-            // it fails for exactly the same reason the first one did.
+            // Spotlight unavailable, disabled, still indexing or too slow:
+            // walk the known application roots. Repeating the same mdfind
+            // query cannot help — it fails for exactly the same reason the
+            // first one did.
             eprintln!("[apps] Spotlight returned no applications; scanning the filesystem instead");
             scan_app_roots()
         }
     };
 
     dedup_entries(entries)
+}
+
+/// How long `mdfind` may take before the enumeration falls back to walking the
+/// filesystem. Spotlight normally answers in milliseconds; a stuck query would
+/// otherwise leave the index empty and the re-index in flight forever.
+const MDFIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `command` and collect its stdout, killing it once `timeout` elapses.
+///
+/// Returns `None` when the command cannot be started, exits unsuccessfully or
+/// outlives the timeout. Output is redirected to a temporary file rather than a
+/// pipe: while polling for exit nothing drains a pipe, so a child that fills
+/// the pipe buffer would deadlock instead of timing out.
+fn output_with_timeout(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "touchery-command-{}-{sequence}.txt",
+        std::process::id()
+    ));
+    let file = std::fs::File::create(&path).ok()?;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => break None,
+        }
+    };
+
+    let stdout = std::fs::read(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+
+    status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }
 
 /// Roots scanned when Spotlight cannot answer. They cover user-installed apps,
@@ -485,6 +541,25 @@ mod tests {
 
         // Exact duplicate paths still collapse.
         assert_eq!(dedup_entries(vec![installed.clone(), installed]).len(), 1);
+    }
+
+    #[test]
+    fn external_commands_are_bounded_by_a_timeout() {
+        let mut fast = Command::new("/bin/echo");
+        fast.arg("hello");
+        let output = output_with_timeout(&mut fast, std::time::Duration::from_secs(5))
+            .expect("echo must run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello\n");
+
+        let mut slow = Command::new("/bin/sleep");
+        slow.arg("30");
+        let started = std::time::Instant::now();
+        assert!(
+            output_with_timeout(&mut slow, std::time::Duration::from_millis(200)).is_none(),
+            "a command that outlives its timeout must be killed"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
