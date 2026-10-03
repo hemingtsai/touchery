@@ -6,6 +6,26 @@ cd "$(dirname "$0")/.."
 APP_NAME="Touchery"
 BUNDLE_ID="com.touchery.app"
 VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+
+# Apple requires CFBundleShortVersionString to be one to three dot-separated
+# integers and CFBundleVersion to be a numeric (dot-separated) build number.
+# Cargo's semver — e.g. 1.2.0-beta — satisfies neither, so derive both from it
+# while the artifact name keeps the full semver, beta suffix included.
+SHORT_VERSION="$(python3 - "$VERSION" <<'PY'
+import re, sys
+match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", sys.argv[1])
+if not match:
+    sys.exit(f"cannot derive an Apple version from: {sys.argv[1]}")
+print(".".join(part or "0" for part in match.groups()))
+PY
+)"
+BUILD_NUMBER="$(python3 - "$SHORT_VERSION" <<'PY'
+import sys
+major, minor, patch = (int(part) for part in sys.argv[1].split("."))
+print(major * 10000 + minor * 100 + patch)
+PY
+)"
+
 STAGING="target/dmg"
 APP_DIR="$STAGING/$APP_NAME.app"
 
@@ -28,8 +48,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>                 <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>          <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>           <string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key>              <string>$VERSION</string>
-    <key>CFBundleShortVersionString</key>   <string>$VERSION</string>
+    <key>CFBundleVersion</key>              <string>$BUILD_NUMBER</string>
+    <key>CFBundleShortVersionString</key>   <string>$SHORT_VERSION</string>
     <key>CFBundleExecutable</key>           <string>touchery</string>
     <key>CFBundlePackageType</key>          <string>APPL</string>
     <key>CFBundleIconFile</key>             <string>touchery</string>
