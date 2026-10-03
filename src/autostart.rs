@@ -26,8 +26,17 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     };
 
     if !enabled {
-        let _ = Command::new("launchctl").args(["unload", &path.display().to_string()]).output();
-        std::fs::remove_file(&path)?;
+        // Persist the disable first. Removing the plist is what stops the
+        // agent from being loaded at the next login; `launchctl unload` would
+        // terminate this very process (launchctl's documented behaviour) and
+        // could kill us before the file was ever deleted, leaving autostart
+        // in place. The already-running instance is meant to keep running —
+        // that is all a "launch at login" switch changes.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         return Ok(());
     }
 
@@ -62,12 +71,14 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Unload old agent before writing new plist to avoid stale content.
+    // Same ordering rule as above: make the persistent state correct before
+    // running launchctl, so an unload that stops this process cannot lose it.
+    std::fs::write(&path, xml)?;
+
+    // Drop any previously loaded copy before loading the new file.
     let _ = Command::new("launchctl")
         .args(["unload", &path.display().to_string()])
         .output();
-
-    std::fs::write(&path, xml)?;
 
     // Load the new agent.
     let out = Command::new("launchctl")
