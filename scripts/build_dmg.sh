@@ -36,7 +36,9 @@ APP_DIR="$STAGING/$APP_NAME.app"
 echo "==> Building release binary"
 # Ask Cargo where it put the executable instead of assuming target/release:
 # with CARGO_TARGET_DIR or CARGO_BUILD_TARGET set that path is wrong or stale.
-BIN="$(cargo build --release --message-format=json | python3 -c '
+# --locked keeps the release reproducible and fails loudly if Cargo.lock is out
+# of sync with the manifests.
+BIN="$(cargo build --release --locked --message-format=json | python3 -c '
 import json, sys
 executable = ""
 for line in sys.stdin:
@@ -57,7 +59,7 @@ fi
 
 echo "==> Generating icon set"
 ICONSET="$TARGET_DIR/touchery.iconset"
-cargo run --release --example gen_icon -- "$ICONSET" >/dev/null
+cargo run --release --locked --example gen_icon -- "$ICONSET" >/dev/null
 
 echo "==> Assembling $APP_NAME.app"
 rm -rf "$APP_DIR"
