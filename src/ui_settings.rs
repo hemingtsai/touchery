@@ -135,7 +135,17 @@ impl SettingsView {
                         self.hotkey = hk;
                         self.saved_at = Some("已保存 ✓".to_string());
                     }
-                    Err(e) => self.saved_at = Some(format!("保存失败: {e}")),
+                    Err(e) => {
+                        // The new combo is live but could not be persisted.
+                        // Re-register the combo the config still holds so the
+                        // panel, the running hotkey and the file stay
+                        // consistent instead of diverging until restart.
+                        let rollback = crate::reregister_current(cx);
+                        self.saved_at = Some(match rollback {
+                            Ok(()) => format!("保存失败: {e}，已恢复原快捷键"),
+                            Err(re) => format!("保存失败: {e}；恢复原快捷键失败: {re}"),
+                        });
+                    }
                 },
                 Err(e) => {
                     self.saved_at = Some(format!("注册失败: {e}，可能被其他应用占用"));
