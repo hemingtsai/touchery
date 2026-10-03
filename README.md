@@ -34,12 +34,13 @@
 - Rust stable（edition 2024）
 - **完整版 Xcode**（含 Metal 编译器，Command Line Tools 不够）
 
-> 本仓库 `.cargo/config.toml` 已配置 `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`。
-> 如你的 Xcode 路径不同（如 `/Applications/Xcode.app`），请修改该文件，或全局执行：
+> 构建使用系统当前选择的 developer 目录。若 `xcode-select -p` 指向的不是完整版 Xcode，请切换：
 >
 > ```bash
 > sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 > ```
+>
+> 或仅为本次构建指定：`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo build`。
 
 ## 构建
 
@@ -266,7 +267,6 @@ src/
 examples/hello.lua  # 示例插件
 examples/gen_icon.rs# 应用图标光栅化工具（打包用）
 scripts/build_dmg.sh# DMG 打包脚本
-.cargo/config.toml  # DEVELOPER_DIR 指向 Xcode-beta（Metal shader 编译需要）
 ```
 
 ### 关键实现决策

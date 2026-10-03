@@ -1,3 +1,0 @@
-# gpui's build script needs the full Xcode toolchain for Metal shader compilation
-[env]
-DEVELOPER_DIR = "/Applications/Xcode-beta.app/Contents/Developer"
