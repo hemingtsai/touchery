@@ -1,6 +1,6 @@
 [package]
 name = "touchery"
-version = "1.2.0-beta"
+version = "1.2.1-beta"
 edition = "2024"
 license = "Apache-2.0"
 
