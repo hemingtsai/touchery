@@ -128,6 +128,9 @@ fn main() {
 
         let apps_updated = Arc::new(AtomicBool::new(false));
         let panel_blurred = Arc::new(AtomicBool::new(false));
+        // True while an application scan is running, so directory events
+        // cannot start a second one and publish a stale result.
+        let reindex_busy = Arc::new(AtomicBool::new(true));
 
         cx.set_global(LauncherWindowState {
             launcher_window: RefCell::new(None),
@@ -152,6 +155,7 @@ fn main() {
         // Index applications in the background once at startup.
         let index_ref = apps_index.clone();
         let index_published = apps_updated.clone();
+        let startup_scan_busy = reindex_busy.clone();
         cx.background_executor()
             .spawn(async move {
                 let entries = apps::enumerate_apps();
@@ -159,6 +163,7 @@ fn main() {
                 // Raise the same flag every later re-index uses, so a launcher
                 // opened before the first scan finishes still picks it up.
                 index_published.store(true, Ordering::SeqCst);
+                startup_scan_busy.store(false, Ordering::SeqCst);
             })
             .detach();
 
@@ -183,6 +188,7 @@ fn main() {
         let watcher_clone = watcher_ref.clone();
         let apps_index_clone = apps_index.clone();
         let apps_updated_clone = apps_updated.clone();
+        let reindex_busy_clone = reindex_busy.clone();
         let mut last_event_time: Option<Instant> = None;
         let mut needs_reindex = false;
         const DEBOUNCE_MS: u64 = 500; // 500ms debounce
@@ -210,13 +216,28 @@ fn main() {
             }
 
             // When debounce window expires and events were received, do full re-index.
-            if needs_reindex {
+            if needs_reindex && !reindex_busy_clone.load(Ordering::SeqCst) {
                 if let Some(last) = last_event_time {
                     if last.elapsed().as_millis() > DEBOUNCE_MS as u128 {
-                        let new_entries = apps::enumerate_apps();
-                        *apps_index_clone.write().unwrap_or_else(|e| e.into_inner()) = new_entries;
-                        apps_updated_clone.store(true, Ordering::SeqCst);
                         needs_reindex = false;
+                        reindex_busy_clone.store(true, Ordering::SeqCst);
+                        // `enumerate_apps` waits on mdfind and AppKit, which
+                        // takes as long as the user's index is slow. This loop
+                        // runs on the foreground thread that also serves the
+                        // hotkey, the tray and every window, so the scan goes
+                        // to the background and only the result comes back.
+                        let index_ref = apps_index_clone.clone();
+                        let updated = apps_updated_clone.clone();
+                        let busy = reindex_busy_clone.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                let new_entries = apps::enumerate_apps();
+                                *index_ref.write().unwrap_or_else(|e| e.into_inner()) =
+                                    new_entries;
+                                updated.store(true, Ordering::SeqCst);
+                                busy.store(false, Ordering::SeqCst);
+                            })
+                            .detach();
                     }
                 }
             }
