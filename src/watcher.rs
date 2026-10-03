@@ -98,7 +98,9 @@ impl AppWatcher {
         // A dropped or incomplete stream means the individual paths can no
         // longer be trusted; ask for a full rebuild instead of guessing.
         if event.flag.intersects(
-            StreamFlags::USER_DROPPED | StreamFlags::KERNEL_DROPPED | StreamFlags::MUST_SCAN_SUBDIRS,
+            StreamFlags::USER_DROPPED
+                | StreamFlags::KERNEL_DROPPED
+                | StreamFlags::MUST_SCAN_SUBDIRS,
         ) {
             return Some(AppEvent::Rescan);
         }
@@ -161,7 +163,8 @@ mod tests {
     #[test]
     fn renames_are_reported_against_the_bundle() {
         // A rename arrives as ITEM_RENAMED only: no created/removed/modified.
-        let renamed = AppWatcher::convert_event(event("/Applications/Final.app", StreamFlags::ITEM_RENAMED));
+        let renamed =
+            AppWatcher::convert_event(event("/Applications/Final.app", StreamFlags::ITEM_RENAMED));
         assert_eq!(
             renamed,
             Some(AppEvent::Modified("/Applications/Final.app".into()))

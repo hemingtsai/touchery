@@ -47,19 +47,21 @@ impl SettingsView {
         // Poll the plugin manager for a cheap, non-blocking state snapshot.
         // Enabling a plugin loads Lua, so the manager lock must never be taken
         // on the UI thread.
-        let plugin_refresh_task = cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(250))
-                .await;
-            let alive = this
-                .update(cx, |view, cx| {
-                    if view.refresh_plugin_rows(cx) {
-                        cx.notify();
-                    }
-                })
-                .is_ok();
-            if !alive {
-                break; // the control panel is gone
+        let plugin_refresh_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let alive = this
+                    .update(cx, |view, cx| {
+                        if view.refresh_plugin_rows(cx) {
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break; // the control panel is gone
+                }
             }
         });
 
@@ -141,9 +143,7 @@ impl SettingsView {
 
         // Require at least one command modifier: shift-only combinations would
         // register ordinary upper-case typing as a global shortcut.
-        if !(keystroke.modifiers.platform
-            || keystroke.modifiers.alt
-            || keystroke.modifiers.control)
+        if !(keystroke.modifiers.platform || keystroke.modifiers.alt || keystroke.modifiers.control)
         {
             self.saved_at = Some("需要至少一个 ⌘/⌥/⌃（仅 ⇧ 会拦截普通输入）".to_string());
             cx.notify();

@@ -50,7 +50,9 @@ pub fn with_budget<T>(lua: &Lua, f: impl FnOnce() -> mlua::Result<T>) -> anyhow:
             let total = executed.get() + u64::from(HOOK_INTERVAL);
             executed.set(total);
             if total > INSTRUCTION_BUDGET {
-                return Err(mlua::Error::RuntimeError("execution budget exceeded".into()));
+                return Err(mlua::Error::RuntimeError(
+                    "execution budget exceeded".into(),
+                ));
             }
             if Instant::now() >= deadline {
                 return Err(mlua::Error::RuntimeError(

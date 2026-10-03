@@ -5,8 +5,9 @@ use std::str::FromStr as _;
 
 /// Modifiers that make a keystroke safe to capture globally. Shift is a
 /// modifier too, but on its own it only distinguishes "a" from "A".
-const COMMAND_MODIFIERS: Modifiers =
-    Modifiers::SUPER.union(Modifiers::CONTROL).union(Modifiers::ALT);
+const COMMAND_MODIFIERS: Modifiers = Modifiers::SUPER
+    .union(Modifiers::CONTROL)
+    .union(Modifiers::ALT);
 
 pub fn default_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)

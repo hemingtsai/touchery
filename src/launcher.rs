@@ -7,8 +7,8 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::{IndexPath, Sizable as _};
 use crate::{themes, ui_theme::*};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 actions!(launcher, [LauncherCancel]);
 
