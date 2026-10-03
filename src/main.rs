@@ -151,10 +151,14 @@ fn main() {
 
         // Index applications in the background once at startup.
         let index_ref = apps_index.clone();
+        let index_published = apps_updated.clone();
         cx.background_executor()
             .spawn(async move {
                 let entries = apps::enumerate_apps();
                 *index_ref.write().unwrap_or_else(|e| e.into_inner()) = entries;
+                // Raise the same flag every later re-index uses, so a launcher
+                // opened before the first scan finishes still picks it up.
+                index_published.store(true, Ordering::SeqCst);
             })
             .detach();
 

@@ -35,6 +35,10 @@ pub struct LauncherView {
     _query_subscription: Subscription,
     _list_subscription: Subscription,
     _sub_input_subscription: Subscription,
+    /// Kept for the lifetime of the view: dropping a `Task` cancels it, so the
+    /// refresh loop below must be owned by the view rather than by a local
+    /// binding that dies when `new` returns.
+    _app_refresh_task: Task<()>,
 }
 
 pub struct LauncherDelegate {
@@ -206,7 +210,7 @@ impl LauncherView {
         // Periodically check for app updates and refresh the list.
         let list_clone = list.clone();
         let window_handle = window.window_handle();
-        let _update_subscription = cx.spawn_in(window, async move |_launcher, cx| loop {
+        let app_refresh_task = cx.spawn_in(window, async move |_launcher, cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(200))
                 .await;
@@ -247,6 +251,7 @@ impl LauncherView {
             _query_subscription: query_subscription,
             _list_subscription: list_subscription,
             _sub_input_subscription: sub_input_subscription,
+            _app_refresh_task: app_refresh_task,
         }
     }
 
