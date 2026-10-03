@@ -6,78 +6,240 @@ use std::process::Command;
 
 use pinyin::ToPinyinMulti;
 
-/// One searchable segment of an app's location: either a localized ancestor
-/// folder ("实用工具") or the app itself (last element).
-#[derive(Debug, Clone)]
-pub struct PathComponent {
-    pub name_lower: String,
-    /// All full-pinyin variants (polyphonic chars produce multiple).
-    pub pinyins: Vec<String>,
-    /// All initial-letter variants (e.g. 音乐 -> ["yl", "yy"]).
-    pub initials: Vec<String>,
+// ---------------------------------------------------------------------------
+// Search keys
+// ---------------------------------------------------------------------------
+
+/// Which field a search key came from. The weight is the ranking preference
+/// applied to a similarity score, in thousandths: a bundle-name match ranks
+/// just below an equally good match on the display name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    DisplayFull,
+    DisplayAbbr,
+    BundleFull,
+    FolderFull,
+    FolderAbbr,
 }
 
-impl PathComponent {
-    pub(crate) fn new(name: String) -> Self {
-        let name_lower = name.to_lowercase();
-        let (pinyins, initials) = pinyin_variants(&name);
-        Self {
-            name_lower,
-            pinyins,
-            initials,
+impl KeyKind {
+    pub fn weight(self) -> u32 {
+        match self {
+            KeyKind::BundleFull => 980,
+            KeyKind::DisplayFull
+            | KeyKind::DisplayAbbr
+            | KeyKind::FolderFull
+            | KeyKind::FolderAbbr => 1000,
         }
     }
 }
 
-/// Max number of cartesian-product pinyin variants per string. App names are
-/// short; polyphonic characters multiply candidates but stay far below this.
-const MAX_PINYIN_VARIANTS: usize = 64;
+/// A spelling under construction: folded bytes, each flagged when it starts a
+/// word.
+type Marked = Vec<(u8, bool)>;
 
-/// Generate all full-pinyin and initial-letter combinations for `name`,
-/// treating every polyphonic character's pronunciations as alternatives.
-/// e.g. 音乐 -> (["yinle", "yinyue"], ["yl", "yy"]).
-pub(crate) fn pinyin_variants(name: &str) -> (Vec<String>, Vec<String>) {
-    fn product(lists: Vec<Vec<String>>) -> Vec<String> {
-        let mut acc: Vec<String> = vec![String::new()];
-        for list in lists {
-            if list.is_empty() {
-                continue; // character contributes nothing (non-Han)
+/// Max number of cartesian-product variants per string. App names are short;
+/// polyphonic characters multiply candidates but stay far below this.
+const MAX_VARIANTS: usize = 64;
+
+/// A prepared search key.
+///
+/// Everything is a-z0-9: Chinese characters are expanded to pinyin at index
+/// time and Latin accents are folded to their base letter, so the scorer never
+/// touches Unicode and can reject impossible matches with a bitmask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchKey {
+    pub chars: Box<[u8]>,
+    /// One bit per character present: 0-25 for a-z, 26-35 for 0-9.
+    pub mask: u64,
+    /// Positions in `chars` that count as word starts; always includes 0.
+    pub starts: Box<[u32]>,
+    pub kind: KeyKind,
+}
+
+/// Mask slot of a folded byte.
+pub(crate) fn mask_slot(byte: u8) -> u32 {
+    debug_assert!(byte.is_ascii_digit() || byte.is_ascii_lowercase());
+    if byte.is_ascii_digit() {
+        26 + u32::from(byte - b'0')
+    } else {
+        u32::from(byte - b'a')
+    }
+}
+
+/// Fold a character to its lowercase ASCII base letter or digit. Accented
+/// Latin letters (é → e) are folded so a Latin keyboard still matches a
+/// localized name; anything else (Chinese, punctuation, space) yields `None`.
+pub(crate) fn ascii_fold(ch: char) -> Option<u8> {
+    let lower = ch.to_lowercase().next()?;
+    if lower.is_ascii() {
+        return lower.is_ascii_alphanumeric().then_some(lower as u8);
+    }
+    Some(match lower {
+        'ß' => b's',
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => b'a',
+        'ç' | 'ć' | 'č' => b'c',
+        'ď' | 'đ' => b'd',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => b'e',
+        'ğ' | 'ģ' => b'g',
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' | 'ı' => b'i',
+        'ł' | 'ĺ' | 'ľ' | 'ļ' => b'l',
+        'ñ' | 'ń' | 'ň' | 'ņ' => b'n',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => b'o',
+        'ŕ' | 'ř' | 'ŗ' => b'r',
+        'ś' | 'š' | 'ş' | 'ș' => b's',
+        'ť' | 'ţ' | 'ț' => b't',
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => b'u',
+        'ý' | 'ÿ' | 'ŷ' => b'y',
+        'ź' | 'ż' | 'ž' => b'z',
+        _ => return None,
+    })
+}
+
+impl SearchKey {
+    fn from_marked(marked: Marked, kind: KeyKind) -> Option<Self> {
+        if marked.is_empty() {
+            return None;
+        }
+        let mut mask = 0u64;
+        let mut starts = Vec::new();
+        let mut chars = Vec::with_capacity(marked.len());
+        for (index, (byte, starts_word)) in marked.into_iter().enumerate() {
+            mask |= 1u64 << mask_slot(byte);
+            if index == 0 || starts_word {
+                starts.push(index as u32);
             }
-            let mut next = Vec::with_capacity(acc.len() * list.len());
-            for prefix in &acc {
-                for item in &list {
-                    next.push(format!("{prefix}{item}"));
+            chars.push(byte);
+        }
+        Some(Self {
+            chars: chars.into_boxed_slice(),
+            mask,
+            starts: starts.into_boxed_slice(),
+            kind,
+        })
+    }
+}
+
+/// Cartesian product of the per-character alternatives, capped.
+fn variants_product(alternatives: Vec<Vec<Marked>>) -> Vec<Marked> {
+    let mut acc: Vec<Marked> = vec![Vec::new()];
+    for alternatives in alternatives {
+        if alternatives.is_empty() {
+            continue; // character contributes nothing
+        }
+        let mut next = Vec::with_capacity(acc.len() * alternatives.len());
+        for prefix in &acc {
+            for alternative in &alternatives {
+                let mut combined = prefix.clone();
+                combined.extend_from_slice(alternative);
+                next.push(combined);
+            }
+        }
+        if next.len() > MAX_VARIANTS {
+            next.truncate(MAX_VARIANTS);
+        }
+        acc = next;
+    }
+    acc
+}
+
+/// Every spelling of `text`: the full one (Chinese characters expanded to
+/// pinyin, polyphonic characters contributing each reading) and the
+/// abbreviation (one letter per Chinese character, one per Latin word).
+fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
+    let mut full_alternatives: Vec<Vec<Marked>> = Vec::new();
+    let mut abbr_alternatives: Vec<Vec<Marked>> = Vec::new();
+    let mut next_starts_word = true;
+    let mut previous_lower_or_digit = false;
+
+    for ch in text.chars() {
+        if let Some(readings) = ch.to_pinyin_multi() {
+            let mut fulls = Vec::new();
+            let mut initials = Vec::new();
+            for reading in readings {
+                let mut chars: Marked = Vec::new();
+                for (index, c) in reading.plain().chars().enumerate() {
+                    if let Some(byte) = ascii_fold(c) {
+                        chars.push((byte, index == 0 && next_starts_word));
+                    }
                 }
+                if chars.is_empty() {
+                    continue;
+                }
+                initials.push(vec![(chars[0].0, true)]);
+                fulls.push(chars);
             }
-            if next.len() > MAX_PINYIN_VARIANTS {
-                next.truncate(MAX_PINYIN_VARIANTS);
+            if !fulls.is_empty() {
+                full_alternatives.push(fulls);
+                abbr_alternatives.push(initials);
             }
-            acc = next;
+            // A Chinese character is a syllable of its own: what follows does
+            // not start a new word unless a separator says so.
+            next_starts_word = false;
+            previous_lower_or_digit = false;
+            continue;
         }
-        acc
+
+        match ascii_fold(ch) {
+            Some(byte) => {
+                let starts_word =
+                    next_starts_word || (ch.is_uppercase() && previous_lower_or_digit);
+                full_alternatives.push(vec![vec![(byte, starts_word)]]);
+                // Latin characters only reach the abbreviation at the start of
+                // a word: "Disk Utility" → "du", not "diskutility".
+                abbr_alternatives.push(vec![if starts_word {
+                    vec![(byte, true)]
+                } else {
+                    Vec::new()
+                }]);
+                next_starts_word = false;
+                previous_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
+            }
+            None => {
+                next_starts_word = true;
+                previous_lower_or_digit = false;
+            }
+        }
     }
 
-    let mut full_lists: Vec<Vec<String>> = Vec::new();
-    let mut initial_lists: Vec<Vec<String>> = Vec::new();
+    (
+        variants_product(full_alternatives),
+        variants_product(abbr_alternatives),
+    )
+}
 
-    for multi in name.to_pinyin_multi() {
-        let Some(multi) = multi else {
-            continue; // non-Han character: dropped, matching old behavior
-        };
-        let mut fulls = Vec::new();
-        let mut inits = Vec::new();
-        for py in multi {
-            let plain = py.plain();
-            fulls.push(plain.to_string());
-            if let Some(c) = plain.chars().next() {
-                inits.push(c.to_string());
+/// Add `key` unless the same spelling is already present: the first kind wins,
+/// which keeps a display-name key ahead of an identical bundle-name key.
+fn push_unique_key(keys: &mut Vec<SearchKey>, key: SearchKey) {
+    if keys.iter().any(|existing| existing.chars == key.chars) {
+        return;
+    }
+    keys.push(key);
+}
+
+/// Search keys of one name: its full spellings plus, optionally, its
+/// abbreviation.
+fn keys_for_name(text: &str, full_kind: KeyKind, abbr_kind: Option<KeyKind>) -> Vec<SearchKey> {
+    let (fulls, abbrs) = latin_variants(text);
+    let mut keys = Vec::new();
+    for marked in fulls {
+        if let Some(key) = SearchKey::from_marked(marked, full_kind) {
+            push_unique_key(&mut keys, key);
+        }
+    }
+    if let Some(kind) = abbr_kind {
+        for marked in abbrs {
+            // A one-letter abbreviation only repeats the first letter of the
+            // full spelling, so it would cost work without adding matches.
+            if marked.len() < 2 {
+                continue;
+            }
+            if let Some(key) = SearchKey::from_marked(marked, kind) {
+                push_unique_key(&mut keys, key);
             }
         }
-        full_lists.push(fulls);
-        initial_lists.push(inits);
     }
-
-    (product(full_lists), product(initial_lists))
+    keys
 }
 
 #[derive(Debug, Clone)]
@@ -87,28 +249,20 @@ pub struct AppEntry {
     /// Localized display name per the user's locale, e.g. "微信".
     pub display_name: String,
     pub path: String,
+    /// Lowercased display name; used to collapse duplicate copies.
     pub display_name_lower: String,
-    pub name_lower: String,
-    /// Pinyin variants derived from the localized display name
-    /// (polyphonic-aware: 音乐 -> ["yinle", "yinyue"]).
-    pub pinyins: Vec<String>,
-    pub initials: Vec<String>,
-    /// Localized hierarchy from the nearest Applications root down to the
-    /// app itself, e.g. ["实用工具", "磁盘工具"]. Empty when the app sits
-    /// directly inside a root.
-    pub path_components: Vec<PathComponent>,
+    /// Prepared keys of the app itself: the display name (full spelling and
+    /// abbreviation) and the bundle name.
+    pub keys: Vec<SearchKey>,
+    /// Prepared keys of each ancestor folder, outermost first. Only queries
+    /// containing '/' consult these.
+    pub folder_keys: Vec<Vec<SearchKey>>,
     /// True when the bundle lives under an Applications root (/Applications,
     /// /System/Applications, ~/Applications, ...) — i.e. a user-facing app.
     pub in_app_dir: bool,
 }
 
 impl AppEntry {
-    /// Convenience constructor; only used by tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn new(name: String, path: String) -> Self {
-        Self::with_display_name(name, path, None)
-    }
-
     pub(crate) fn with_display_name(name: String, path: String, localized: Option<String>) -> Self {
         let display_name = localized.unwrap_or_else(|| {
             // Fallback when Spotlight gave us nothing: ask LaunchServices
@@ -117,21 +271,31 @@ impl AppEntry {
             localized_display_name(&path).unwrap_or_else(|| name.clone())
         });
         let display_name_lower = display_name.to_lowercase();
-        let name_lower = name.to_lowercase();
 
-        let (pinyins, initials) = pinyin_variants(&display_name);
+        // The bundle name only speaks for itself, never as an abbreviation:
+        // "WeChat" is typed in full.
+        let mut keys = keys_for_name(
+            &display_name,
+            KeyKind::DisplayFull,
+            Some(KeyKind::DisplayAbbr),
+        );
+        for key in keys_for_name(&name, KeyKind::BundleFull, None) {
+            push_unique_key(&mut keys, key);
+        }
 
-        let (path_components, in_app_dir) = build_path_components(&path, &display_name);
+        let (folder_names, in_app_dir) = build_folder_names(&path);
+        let folder_keys = folder_names
+            .iter()
+            .map(|folder| keys_for_name(folder, KeyKind::FolderFull, Some(KeyKind::FolderAbbr)))
+            .collect();
 
         Self {
             name,
             display_name,
             path,
             display_name_lower,
-            name_lower,
-            pinyins,
-            initials,
-            path_components,
+            keys,
+            folder_keys,
             in_app_dir,
         }
     }
@@ -177,24 +341,21 @@ fn folder_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Walk the folder hierarchy between the nearest Applications root and the
-/// app bundle, localizing each level.
-fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<PathComponent>, bool) {
+/// Localized names of the folders between the nearest Applications root and
+/// the app bundle, outermost first, plus whether the bundle counts as
+/// user-facing.
+fn build_folder_names(bundle_path: &str) -> (Vec<String>, bool) {
     let Some(root_idx) = bundle_path.find(APPS_MARKER) else {
-        // Not under an Applications root: treat the app alone as its own
-        // component (still slash-searchable). Apps under a known
-        // user-facing root (CoreServices: Finder & friends) still count as
-        // in-scope; anything else is flagged out-of-scope.
+        // Not under an Applications root: no ancestors to search. Apps under a
+        // known user-facing root (CoreServices: Finder & friends) still count
+        // as in-scope; anything else is flagged out-of-scope.
         let in_app_dir = EXTRA_USER_ROOTS
             .iter()
             .any(|root| bundle_path.starts_with(root));
-        return (
-            vec![PathComponent::new(app_display_name.to_string())],
-            in_app_dir,
-        );
+        return (Vec::new(), in_app_dir);
     };
 
-    let mut components = Vec::new();
+    let mut folders = Vec::new();
 
     // Everything between "<root>/Applications/" and "<Name>.app" is folders.
     let after_root = &bundle_path[root_idx + APPS_MARKER.len()..];
@@ -206,11 +367,10 @@ fn build_path_components(bundle_path: &str, app_display_name: &str) -> (Vec<Path
         }
         walked.push('/');
         walked.push_str(seg);
-        components.push(PathComponent::new(localized_folder(&walked)));
+        folders.push(localized_folder(&walked));
     }
-    components.push(PathComponent::new(app_display_name.to_string()));
 
-    (components, true)
+    (folders, true)
 }
 
 /// Ask LaunchServices/NSFileManager for the localized display name of a file
@@ -493,23 +653,154 @@ mod tests {
     }
 
     #[test]
-    fn path_component_building() {
-        // No localized FFI assertions here (locale-dependent); verify
-        // structure: folders become components, app is last, flag set.
-        let (components, in_app_dir) =
-            build_path_components("/System/Applications/Utilities/Disk Utility.app", "磁盘工具");
+    fn folder_names_follow_the_path() {
+        // No localized-name assertions here (locale-dependent); verify the
+        // structure instead: ancestors are listed outermost first.
+        let (folders, in_app_dir) =
+            build_folder_names("/System/Applications/Utilities/Disk Utility.app");
         assert!(in_app_dir);
-        assert_eq!(components.last().unwrap().name_lower, "磁盘工具");
-        assert!(components.len() >= 2); // at least [Utilities?, 磁盘工具]
+        assert_eq!(folders.len(), 1);
 
-        let (components, in_app_dir) =
-            build_path_components("/Applications/Safari.app", "Safari浏览器");
+        let (folders, in_app_dir) = build_folder_names("/Applications/Safari.app");
         assert!(in_app_dir);
-        assert_eq!(components.len(), 1);
+        assert!(folders.is_empty(), "no ancestors below the root");
 
-        let (_, in_app_dir) =
-            build_path_components("/usr/libexec/SomeHelper.app", "SomeHelper");
+        let (folders, in_app_dir) = build_folder_names("/usr/libexec/SomeHelper.app");
         assert!(!in_app_dir);
+        assert!(folders.is_empty());
+    }
+
+    fn key_spellings(text: &str, kind: KeyKind) -> Vec<String> {
+        keys_for_name(text, kind, None)
+            .iter()
+            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .collect()
+    }
+
+    #[test]
+    fn latin_names_keep_their_letters_and_drop_redundant_abbreviations() {
+        let entry = AppEntry::with_display_name(
+            "Safari".into(),
+            "/Applications/Safari.app".into(),
+            Some("Safari".into()),
+        );
+        let spellings: Vec<String> = entry
+            .keys
+            .iter()
+            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .collect();
+
+        // The display key and the identical bundle key are the same spelling,
+        // so only one survives, with the display name's kind.
+        assert_eq!(spellings, vec!["safari".to_string()]);
+        assert_eq!(entry.keys[0].kind, KeyKind::DisplayFull);
+        // A one-letter abbreviation only repeats the first letter.
+        assert!(!spellings.contains(&"s".to_string()));
+    }
+
+    #[test]
+    fn han_names_become_pinyin_plus_abbreviations() {
+        let entry = AppEntry::with_display_name(
+            "WeChat".into(),
+            "/Applications/WeChat.app".into(),
+            Some("微信".into()),
+        );
+        let by_kind = |kind: KeyKind| -> Vec<String> {
+            entry
+                .keys
+                .iter()
+                .filter(|key| key.kind == kind)
+                .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+                .collect()
+        };
+
+        assert!(by_kind(KeyKind::DisplayFull).contains(&"weixin".to_string()));
+        assert!(by_kind(KeyKind::DisplayAbbr).contains(&"wx".to_string()));
+        assert!(by_kind(KeyKind::BundleFull).contains(&"wechat".to_string()));
+    }
+
+    #[test]
+    fn polyphonic_readings_are_all_indexed() {
+        assert!(key_spellings("音乐", KeyKind::DisplayFull).contains(&"yinyue".to_string()));
+        assert!(key_spellings("音乐", KeyKind::DisplayFull).contains(&"yinle".to_string()));
+
+        let initials: Vec<String> =
+            keys_for_name("音乐", KeyKind::DisplayAbbr, Some(KeyKind::DisplayAbbr))
+                .iter()
+                .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+                .collect();
+        assert!(initials.contains(&"yy".to_string()), "{initials:?}");
+        assert!(initials.contains(&"yl".to_string()), "{initials:?}");
+    }
+
+    #[test]
+    fn word_starts_survive_separators_and_camel_case() {
+        let (fulls, abbrs) = latin_variants("Disk Utility");
+        let spelling =
+            |marked: &Marked| -> String { marked.iter().map(|(byte, _)| *byte as char).collect() };
+        let starts = |marked: &Marked| -> Vec<usize> {
+            marked
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, starts_word))| *starts_word)
+                .map(|(index, _)| index)
+                .collect()
+        };
+
+        let full = fulls
+            .iter()
+            .find(|marked| spelling(marked) == "diskutility")
+            .expect("full spelling");
+        assert_eq!(starts(full), vec![0, 4]);
+        assert_eq!(spelling(&abbrs[0]), "du");
+
+        let (camel, _) = latin_variants("WeChat");
+        let full = camel
+            .iter()
+            .find(|marked| spelling(marked) == "wechat")
+            .expect("full spelling");
+        assert_eq!(starts(full), vec![0, 2]);
+    }
+
+    #[test]
+    fn masks_and_starts_cover_every_character() {
+        let key = &keys_for_name("A1b", KeyKind::DisplayFull, None)[0];
+        assert_eq!(&*key.chars, b"a1b");
+        assert_eq!(key.mask.count_ones(), 3);
+        assert!(key.mask & (1u64 << mask_slot(b'a')) != 0);
+        assert!(key.mask & (1u64 << mask_slot(b'1')) != 0);
+        assert_eq!(&*key.starts, &[0]);
+    }
+
+    #[test]
+    fn folder_keys_are_built_from_the_ancestors() {
+        let entry = AppEntry::with_display_name(
+            "My App".into(),
+            "/Applications/Dev Tools/My App.app".into(),
+            Some("My App".into()),
+        );
+        assert_eq!(entry.folder_keys.len(), 1);
+        let folder: Vec<String> = entry.folder_keys[0]
+            .iter()
+            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .collect();
+        assert!(folder.contains(&"devtools".to_string()), "{folder:?}");
+        assert!(folder.contains(&"dt".to_string()), "{folder:?}");
+        assert!(
+            entry.folder_keys[0]
+                .iter()
+                .all(|key| matches!(key.kind, KeyKind::FolderFull | KeyKind::FolderAbbr))
+        );
+    }
+
+    #[test]
+    fn names_without_an_applications_root_have_no_folder_keys() {
+        let entry = AppEntry::with_display_name(
+            "Helper".into(),
+            "/usr/libexec/Helper.app".into(),
+            Some("Helper".into()),
+        );
+        assert!(entry.folder_keys.is_empty());
     }
 
     #[test]
@@ -588,16 +879,16 @@ mod tests {
     #[test]
     fn finder_in_coreservices_is_user_facing() {
         // 访达 lives in CoreServices, not under an /Applications/ root.
-        let (components, in_app_dir) =
-            build_path_components("/System/Library/CoreServices/Finder.app", "访达");
+        let (folders, in_app_dir) = build_folder_names("/System/Library/CoreServices/Finder.app");
         assert!(in_app_dir, "Finder must survive the apps-only filter");
-        assert_eq!(components.len(), 1);
-        assert_eq!(components[0].name_lower, "访达");
+        assert!(
+            folders.is_empty(),
+            "CoreServices is a root, not an ancestor"
+        );
 
         // A genuine system helper outside every known user root stays out.
-        let (_, in_app_dir) = build_path_components(
+        let (_, in_app_dir) = build_folder_names(
             "/System/Library/PrivateFrameworks/Something.framework/Versions/A/Helper.app",
-            "Helper",
         );
         assert!(!in_app_dir);
     }
