@@ -87,7 +87,7 @@ impl Default for HotkeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
@@ -101,6 +101,30 @@ pub struct Config {
     /// Scoring knobs for the launcher search; missing values keep the
     /// defaults, so an older config file stays valid.
     pub search: crate::search::SearchTuning,
+    /// Support system input methods (Chinese, Japanese, …) in the launcher.
+    ///
+    /// The launcher panel never activates the application by itself, and macOS
+    /// only attaches an input method to the active application, so with this on
+    /// the launcher takes the keyboard while it is open and hands it back when
+    /// it closes. Off keeps the frontmost application untouched, at the price
+    /// of Latin-only input in the search box.
+    pub ime: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hotkey: HotkeyConfig::default(),
+            plugins: HashMap::new(),
+            theme: String::new(),
+            apps_only: false,
+            search: crate::search::SearchTuning::default(),
+            // On by default: without it a Chinese keyboard cannot type here at
+            // all, which is a worse surprise than the keyboard being taken for
+            // as long as the launcher is open.
+            ime: true,
+        }
+    }
 }
 
 impl Config {
@@ -218,6 +242,14 @@ mod tests {
 
         // A config written before the tuning existed keeps the defaults.
         assert_eq!(loaded.config.search, crate::search::SearchTuning::default());
+        // Input-method support is on unless it was switched off.
+        assert!(loaded.config.ime);
+
+        let latin_only = dir.join("latin-only.json");
+        std::fs::write(&latin_only, r#"{"ime":false}"#).unwrap();
+        let loaded = Config::read_from(&latin_only);
+        assert!(loaded.unusable.is_none());
+        assert!(!loaded.config.ime);
 
         // A hand-edited tuning block is loaded as written.
         let tuned = dir.join("tuned.json");

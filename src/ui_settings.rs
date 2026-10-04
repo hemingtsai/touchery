@@ -852,7 +852,29 @@ impl SettingsView {
                 }),
         );
 
-        let apps_only = crate::config::Config::load().apps_only;
+        let config = crate::config::Config::load();
+        let entity = cx.entity();
+        let ime_row = setting_row(
+            pal,
+            "输入法支持",
+            "打开后唤起时临时取得前台，系统输入法（中文/日文等）才能在输入框组字；关闭则完全不抢前台，但只能用英文或拼音搜索；下次唤起生效",
+            Switch::new("ime-toggle")
+                .flex_shrink_0()
+                .checked(config.ime)
+                .on_click(move |checked: &bool, _window, cx| {
+                    let result = crate::config::modify(|config| {
+                        config.ime = *checked;
+                    });
+                    entity.update(cx, |_, cx| {
+                        if let Err(e) = result {
+                            eprintln!("[settings] failed to save ime: {e}");
+                        }
+                        cx.notify();
+                    });
+                }),
+        );
+
+        let apps_only = config.apps_only;
         let entity = cx.entity();
         let apps_only_row = setting_row(
             pal,
@@ -883,6 +905,8 @@ impl SettingsView {
                 .child(section_title("启动与索引".to_string(), pal))
                 .child(launch_row)
                 .child(apps_only_row)
+                .child(section_title("输入".to_string(), pal))
+                .child(ime_row)
                 .into_any_element(),
         ]
     }

@@ -413,11 +413,17 @@ fn toggle_launcher(cx: &mut App) {
 
     // Input methods (Chinese, Japanese, emoji, …) only compose into the
     // focused view when the application is active, and the launcher's
-    // non-activating panel never activates it by itself. Take the keyboard
-    // before showing the panel, remembering who had it, and hand it back on
-    // dismiss.
-    *cx.global::<LauncherWindowState>().previous_app.borrow_mut() = keyboard_owner_pid();
-    cx.activate(true);
+    // non-activating panel never activates it by itself. With the control
+    // panel's switch on, take the keyboard before showing the panel —
+    // remembering who had it — and hand it back on dismiss. With it off, the
+    // frontmost application is not touched at all.
+    let previous_app = if crate::config::Config::load().ime {
+        cx.activate(true);
+        keyboard_owner_pid()
+    } else {
+        None
+    };
+    *cx.global::<LauncherWindowState>().previous_app.borrow_mut() = previous_app;
 
     let (bounds, display_id) = compute_spotlight_bounds(cx);
     let handle = cx
