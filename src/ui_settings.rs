@@ -133,7 +133,13 @@ fn humanize_age(seconds: i64) -> String {
 #[derive(Clone, PartialEq)]
 struct PluginRowView {
     file_name: String,
+    /// What the plugin calls itself (else the file stem).
     name: String,
+    version: Option<String>,
+    author: Option<String>,
+    license: Option<String>,
+    repository: Option<String>,
+    description: Option<String>,
     enabled: bool,
     /// Whether a Lua runtime is loaded for this plugin right now.
     loaded: bool,
@@ -533,7 +539,12 @@ impl SettingsView {
             .iter()
             .map(|p| PluginRowView {
                 file_name: p.file_name.clone(),
-                name: p.name.clone(),
+                name: p.display_name().to_string(),
+                version: p.info.version.clone(),
+                author: p.info.author.clone(),
+                license: p.info.license.clone(),
+                repository: p.info.repository.clone(),
+                description: p.info.description.clone(),
                 enabled: p.enabled,
                 loaded: p.runtime_loaded(),
                 error: p.error.clone(),
@@ -628,21 +639,32 @@ impl SettingsView {
                         }) {
                             eprintln!("[plugin] failed to enable {file_name}: {e:#}");
                         }
-                        let loaded_error = {
+                        let (loaded_error, duplicates) = {
                             let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
-                            match manager.load_installed(&file_name) {
+                            let error = match manager.load_installed(&file_name) {
                                 Err(e) => Some(format!("{e:#}")),
                                 Ok(()) => manager
                                     .plugins
                                     .iter()
                                     .find(|plugin| plugin.file_name == file_name)
                                     .and_then(|plugin| plugin.error.clone()),
-                            }
+                            };
+                            (error, manager.duplicates_of(&file_name))
                         };
                         match loaded_error {
                             Some(error) => InstallStatus {
                                 message: format!("已安装 {file_name}，但加载失败: {error}"),
                                 failed: true,
+                            },
+                            // Two copies of the same plugin both stay enabled:
+                            // say so instead of silently listing the same name
+                            // twice with no explanation.
+                            None if !duplicates.is_empty() => InstallStatus {
+                                message: format!(
+                                    "已安装 {file_name}（与已存在的 {} 看起来是同一个插件，都在启用中）",
+                                    duplicates.join("、")
+                                ),
+                                failed: false,
                             },
                             None => InstallStatus {
                                 message: format!("已安装 {file_name}"),
@@ -694,7 +716,24 @@ impl SettingsView {
             pal.text_secondary
         };
 
-        div()
+        // "文件名 · 作者 · 许可证"; the file name is what the toggle and the
+        // installer work with, so it stays visible even when the plugin
+        // renames itself.
+        let mut details = vec![plugin.file_name.clone()];
+        if let Some(author) = &plugin.author {
+            details.push(author.clone());
+        }
+        if let Some(license) = &plugin.license {
+            details.push(license.clone());
+        }
+        let details = details.join(" · ");
+
+        let title = match &plugin.version {
+            Some(version) => format!("{} {version}", plugin.name),
+            None => plugin.name.clone(),
+        };
+
+        let mut row = div()
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -707,58 +746,110 @@ impl SettingsView {
             .child(
                 // Name column: flex_1 so it shrinks instead of pushing the
                 // status/switch out of the row.
-                div().flex_1().min_w(px(0.)).overflow_hidden().child(
-                    div()
-                        .text_size(px(13.0))
-                        .whitespace_nowrap()
-                        .truncate()
-                        .text_color(pal.text_primary)
-                        .child(plugin.name.clone()),
-                ),
-            )
-            .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap_y_0p5()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_primary)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_secondary)
+                            .child(details),
+                    )
+                    .children(plugin.description.clone().map(|description| {
+                        div()
+                            .text_size(px(11.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_secondary)
+                            .child(description)
+                    })),
+            );
+
+        if let Some(repository) = plugin.repository.clone() {
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("plugin-repo-{file_name}")))
                     .flex_shrink_0()
                     .text_size(px(11.0))
-                    .whitespace_nowrap()
-                    .text_color(status_color)
-                    .child(status_text),
-            )
-            .child(
-                Switch::new(SharedString::from(format!("plugin-toggle-{file_name}")))
-                    .checked(plugin.enabled)
-                    .on_click(move |checked: &bool, _window, cx| {
-                        let pm = crate::plugin_manager(cx);
-                        let checked = *checked;
-                        let file_name_for_task = file_name.clone();
-                        // Loading/unloading a plugin runs its Lua, so it must
-                        // not happen on the UI thread; the refresh timer above
-                        // picks up the outcome.
+                    .text_color(pal.accent_info)
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .on_click(move |_, _, cx: &mut App| {
+                        let repository = repository.clone();
+                        // `open` waits for LaunchServices, so reaping it here
+                        // keeps a zombie from piling up if the user clicks
+                        // around.
                         cx.background_executor()
                             .spawn(async move {
-                                let result = pm
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .set_enabled(&file_name_for_task, checked);
-                                if let Err(e) = result {
-                                    eprintln!("[plugin] toggle failed: {e:#}");
-                                }
+                                let _ =
+                                    std::process::Command::new("open").arg(&repository).status();
                             })
                             .detach();
-                        // Reflect the click immediately; a later refresh
-                        // corrects the row if the change did not stick.
-                        entity.update(cx, |view, cx| {
-                            if let Some(row) = view
-                                .plugin_rows
-                                .iter_mut()
-                                .find(|row| row.file_name == file_name)
-                            {
-                                row.enabled = checked;
+                    })
+                    .child("仓库"),
+            );
+        }
+
+        // The status and the switch close the row; the chain itself is the
+        // function's value.
+        row.child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .whitespace_nowrap()
+                .text_color(status_color)
+                .child(status_text),
+        )
+        .child(
+            Switch::new(SharedString::from(format!("plugin-toggle-{file_name}")))
+                .flex_shrink_0()
+                .checked(plugin.enabled)
+                .on_click(move |checked: &bool, _window, cx| {
+                    let pm = crate::plugin_manager(cx);
+                    let checked = *checked;
+                    let file_name_for_task = file_name.clone();
+                    // Loading/unloading a plugin runs its Lua, so it must
+                    // not happen on the UI thread; the refresh timer above
+                    // picks up the outcome.
+                    cx.background_executor()
+                        .spawn(async move {
+                            let result = pm
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .set_enabled(&file_name_for_task, checked);
+                            if let Err(e) = result {
+                                eprintln!("[plugin] toggle failed: {e:#}");
                             }
-                            cx.notify();
-                        });
-                    }),
-            )
+                        })
+                        .detach();
+                    // Reflect the click immediately; a later refresh
+                    // corrects the row if the change did not stick.
+                    entity.update(cx, |view, cx| {
+                        if let Some(row) = view
+                            .plugin_rows
+                            .iter_mut()
+                            .find(|row| row.file_name == file_name)
+                        {
+                            row.enabled = checked;
+                        }
+                        cx.notify();
+                    });
+                }),
+        )
     }
 }
 

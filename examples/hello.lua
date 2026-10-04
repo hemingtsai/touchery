@@ -3,9 +3,19 @@
 -- 使用：唤起启动器后输入 "> 关键词" 路由到本插件
 --
 -- 契约：
+--   PLUGIN                     可选：插件自述（名称/版本/作者/许可证/仓库/说明）
 --   get_items(query)          -> { { title, value, sub }, ... }  sub=true 表示需要二级输入
 --   run(value, query)         -> 一级回车（sub=false 的条目）
 --   run_sub(value, sub_query) -> 二级输入回车后调用
+
+PLUGIN = {
+    name = "示例插件",
+    version = "1.0.0",
+    author = "hemingtsai",
+    license = "Apache-2.0",
+    repository = "https://github.com/hemingtsai/touchery",
+    description = "演示插件契约：问候、回声与二级输入",
+}
 
 local LOG = os.getenv("HOME") .. "/Library/Application Support/touchery/plugin.log"
 

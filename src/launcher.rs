@@ -19,7 +19,10 @@ pub const PLUGIN_PREFIX: &str = ">";
 pub enum Row {
     App(usize),
     Plugin {
+        /// Identity of the plugin for dispatch: its file stem.
         plugin_name: String,
+        /// Name to show: what the plugin calls itself.
+        plugin_label: String,
         item: PluginItem,
     },
 }
@@ -127,7 +130,9 @@ impl ListDelegate for LauncherDelegate {
     ) -> Option<Self::Item> {
         let text = match self.row_at(ix.row)? {
             Row::App(app_idx) => self.apps[*app_idx].display_name.clone(),
-            Row::Plugin { plugin_name, item } => format!("{}:{}", plugin_name, item.title),
+            Row::Plugin {
+                plugin_label, item, ..
+            } => format!("{}:{}", plugin_label, item.title),
         };
         let pal = themes::palette(cx);
         Some(
@@ -369,9 +374,11 @@ impl LauncherView {
                         if !plugin.available() {
                             continue;
                         }
+                        let label = plugin.display_name().to_string();
                         for item in plugin.query(&rest) {
                             rows.push(Row::Plugin {
                                 plugin_name: plugin.name.clone(),
+                                plugin_label: label.clone(),
                                 item,
                             });
                         }
@@ -493,7 +500,9 @@ impl LauncherView {
                 })
                 .detach();
             }
-            Row::Plugin { plugin_name, item } => {
+            Row::Plugin {
+                plugin_name, item, ..
+            } => {
                 if item.sub {
                     self.mode = Mode::SubInput {
                         plugin_name,
@@ -693,6 +702,7 @@ mod tests {
         ]);
         delegate.plugin_rows = vec![Row::Plugin {
             plugin_name: "hello".into(),
+            plugin_label: "hello".into(),
             item: PluginItem {
                 title: "问候".into(),
                 value: "hello".into(),

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::lua_budget;
 use anyhow::Context as _;
-use mlua::{Function, Lua, Table};
+use mlua::{Function, Lua, Table, Value};
 use std::path::PathBuf;
 
 /// A single item produced by a plugin's `get_items`.
@@ -13,9 +13,79 @@ pub struct PluginItem {
     pub sub: bool,
 }
 
+/// Optional self-description a plugin may declare:
+///
+/// ```lua
+/// PLUGIN = {
+///   name = "计算器", version = "1.0.0", author = "…",
+///   license = "MIT", repository = "https://…", description = "…",
+/// }
+/// ```
+///
+/// Every field is optional; `name` falls back to the file stem. Values are
+/// trimmed and length-capped, and `repository` is only kept when it is an
+/// http(s) URL — it is handed to `open`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginInfo {
+    pub name: String,
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub license: Option<String>,
+    pub repository: Option<String>,
+    pub description: Option<String>,
+}
+
+impl PluginInfo {
+    fn with_name(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Longest accepted metadata string, per field.
+const INFO_MAX: usize = 120;
+
+/// Read the `PLUGIN` table a plugin may define. A malformed or missing table
+/// simply means "no metadata"; it never fails the load.
+fn read_info(lua: &Lua, fallback_name: &str) -> PluginInfo {
+    let mut info = PluginInfo::with_name(fallback_name);
+    let Ok(Some(table)) = lua.globals().get::<Option<Table>>("PLUGIN") else {
+        return info;
+    };
+    // Only real Lua strings count: a malformed table must not smuggle
+    // anything else in (numbers would otherwise be coerced for us).
+    let field = |key: &str| -> Option<String> {
+        match table.get::<Option<Value>>(key).ok().flatten() {
+            Some(Value::String(value)) => {
+                let value = value.to_string_lossy();
+                let value = value.trim();
+                let value: String = value.chars().take(INFO_MAX).collect();
+                (!value.is_empty()).then_some(value)
+            }
+            _ => None,
+        }
+    };
+    if let Some(name) = field("name") {
+        info.name = name;
+    }
+    info.version = field("version");
+    info.author = field("author");
+    info.license = field("license");
+    info.description = field("description");
+    info.repository =
+        field("repository").filter(|url| url.starts_with("https://") || url.starts_with("http://"));
+    info
+}
+
 pub struct Plugin {
     pub file_name: String,
+    /// Unique identity of the plugin: the file stem. Routing and toggling use
+    /// this, never the declared name, which two files may share.
     pub name: String,
+    /// What the plugin says about itself, for display.
+    pub info: PluginInfo,
     pub enabled: bool,
     pub error: Option<String>,
     lua: Option<Lua>,
@@ -47,6 +117,7 @@ impl Plugin {
         lua_budget::with_budget(&lua, || lua.load(&source).exec())
             .with_context(|| format!("failed to initialize plugin {}", path.display()))?;
 
+        let info = read_info(&lua, &name);
         let get_items_fn = lua.globals().get::<Option<Function>>("get_items")?;
         let run_fn = lua.globals().get::<Option<Function>>("run")?;
         let run_sub_fn = lua.globals().get::<Option<Function>>("run_sub")?;
@@ -62,6 +133,7 @@ impl Plugin {
         Ok(Self {
             file_name,
             name,
+            info,
             enabled: true,
             error: None,
             lua: Some(lua),
@@ -74,15 +146,26 @@ impl Plugin {
     /// Metadata-only entry for a plugin that has no live runtime — either
     /// disabled by the user or failed to load.
     fn unloaded(file_name: String, name: String, enabled: bool) -> Self {
+        let info = PluginInfo::with_name(&name);
         Self {
             file_name,
             name,
+            info,
             enabled,
             error: None,
             lua: None,
             get_items_fn: None,
             run_fn: None,
             run_sub_fn: None,
+        }
+    }
+
+    /// Name to show in the UI: what the plugin calls itself, else the file stem.
+    pub fn display_name(&self) -> &str {
+        if self.info.name.is_empty() {
+            &self.name
+        } else {
+            &self.info.name
         }
     }
 
@@ -315,6 +398,33 @@ impl PluginManager {
         self.plugins.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     }
 
+    /// Other plugins that look like the same one: same declared name
+    /// (case-insensitive) or same repository. Used to warn when installing a
+    /// second copy of a plugin.
+    pub fn duplicates_of(&self, file_name: &str) -> Vec<String> {
+        let Some(plugin) = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.file_name == file_name)
+        else {
+            return Vec::new();
+        };
+        let name = plugin.info.name.trim().to_lowercase();
+        let repository = plugin.info.repository.clone();
+        self.plugins
+            .iter()
+            .filter(|other| other.file_name != file_name)
+            .filter(|other| {
+                let same_name = !name.is_empty() && other.info.name.trim().to_lowercase() == name;
+                let same_repository = repository
+                    .as_deref()
+                    .is_some_and(|url| other.info.repository.as_deref() == Some(url));
+                same_name || same_repository
+            })
+            .map(|other| other.file_name.clone())
+            .collect()
+    }
+
     pub fn find_by_file_mut(&mut self, file_name: &str) -> Option<&mut Plugin> {
         self.plugins.iter_mut().find(|p| p.file_name == file_name)
     }
@@ -407,6 +517,137 @@ mod tests {
         assert!(plugins_dir.join("calc.lua").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn plugin_with_info(file_name: &str, info: PluginInfo) -> Plugin {
+        let mut plugin =
+            Plugin::unloaded(file_name.to_string(), file_name.replace(".lua", ""), true);
+        plugin.info = info;
+        plugin
+    }
+
+    #[test]
+    fn a_plugin_can_describe_itself() {
+        let dir = std::env::temp_dir().join("touchery-plugin-info-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Full metadata.
+        let full = dir.join("calc.lua");
+        std::fs::write(
+            &full,
+            r##"
+            PLUGIN = {
+                name = "计算器",
+                version = "1.0.0",
+                author = "hemingtsai",
+                license = "MIT",
+                repository = "https://github.com/hemingtsai/touchery",
+                description = "四则运算加次方",
+            }
+            function get_items(query) return {} end
+            function run(value, query) end
+            function run_sub(value, sub_query) end
+            "##,
+        )
+        .unwrap();
+        let plugin = Plugin::load(&full).unwrap();
+        assert_eq!(plugin.display_name(), "计算器");
+        assert_eq!(plugin.info.version.as_deref(), Some("1.0.0"));
+        assert_eq!(plugin.info.author.as_deref(), Some("hemingtsai"));
+        assert_eq!(plugin.info.license.as_deref(), Some("MIT"));
+        assert_eq!(
+            plugin.info.repository.as_deref(),
+            Some("https://github.com/hemingtsai/touchery")
+        );
+        assert_eq!(plugin.info.description.as_deref(), Some("四则运算加次方"));
+        // Identity stays the file stem even when the plugin renames itself.
+        assert_eq!(plugin.name, "calc");
+
+        // No metadata at all: the file stem is the name.
+        let bare = dir.join("plain.lua");
+        std::fs::write(
+            &bare,
+            "function get_items(query) return {} end\nfunction run(value, query) end\nfunction run_sub(value, sub_query) end\n",
+        )
+        .unwrap();
+        let plugin = Plugin::load(&bare).unwrap();
+        assert_eq!(plugin.display_name(), "plain");
+        assert!(plugin.info.version.is_none());
+
+        // Garbage metadata is ignored rather than fatal, and a non-http
+        // "repository" is dropped (it is handed to `open`).
+        let junk = dir.join("junk.lua");
+        std::fs::write(
+            &junk,
+            r##"
+            PLUGIN = {
+                name = 42,
+                version = "  1.2  ",
+                author = "",
+                repository = "file:///etc/passwd",
+                description = string.rep("x", 500),
+            }
+            function get_items(query) return {} end
+            function run(value, query) end
+            function run_sub(value, sub_query) end
+            "##,
+        )
+        .unwrap();
+        let plugin = Plugin::load(&junk).unwrap();
+        assert_eq!(
+            plugin.display_name(),
+            "junk",
+            "a non-string name is ignored"
+        );
+        assert_eq!(plugin.info.version.as_deref(), Some("1.2"), "trimmed");
+        assert!(plugin.info.author.is_none(), "empty strings are dropped");
+        assert!(plugin.info.repository.is_none(), "only http(s) survives");
+        assert_eq!(plugin.info.description.unwrap().chars().count(), INFO_MAX);
+
+        // A PLUGIN that is not a table must not break the load either.
+        let wrong = dir.join("wrong.lua");
+        std::fs::write(
+            &wrong,
+            "PLUGIN = \"nope\"\nfunction get_items(query) return {} end\nfunction run(value, query) end\nfunction run_sub(value, sub_query) end\n",
+        )
+        .unwrap();
+        assert_eq!(Plugin::load(&wrong).unwrap().display_name(), "wrong");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installing_a_second_copy_of_a_plugin_is_reported() {
+        let mut info = PluginInfo::with_name("计算器");
+        info.repository = Some("https://github.com/hemingtsai/touchery".to_string());
+        let manager = PluginManager {
+            plugins: vec![
+                plugin_with_info("calc.lua", info.clone()),
+                // Same declared name, different file: a duplicate.
+                plugin_with_info("calc-2.lua", PluginInfo::with_name("计算器")),
+                // Same repository, different name: a duplicate too.
+                plugin_with_info("other.lua", info.clone()),
+                // Same file name is never reported against itself.
+                plugin_with_info("third.lua", PluginInfo::with_name("別的")),
+            ],
+        };
+
+        let duplicates = manager.duplicates_of("calc.lua");
+        assert!(
+            duplicates.contains(&"calc-2.lua".to_string()),
+            "{duplicates:?}"
+        );
+        assert!(
+            duplicates.contains(&"other.lua".to_string()),
+            "{duplicates:?}"
+        );
+        assert!(!duplicates.contains(&"third.lua".to_string()));
+        assert!(
+            !duplicates.contains(&"calc.lua".to_string()),
+            "a plugin is not its own duplicate"
+        );
+        assert!(manager.duplicates_of("missing.lua").is_empty());
     }
 
     #[test]
