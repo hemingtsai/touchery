@@ -435,6 +435,30 @@ fn plugin_key(info: &PluginInfo) -> String {
     format!("{author}/{}", info.name.trim().to_lowercase())
 }
 
+/// File stem without the `-<version>` an installation appends:
+/// `hemingtsai/计算器-1.0.0.lua` -> `计算器`, `calc.lua` -> `calc`.
+fn stem_without_version(relative: &str) -> String {
+    let name = Path::new(relative)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".lua").unwrap_or(&name).to_string();
+    // Search from the right: a pre-release suffix contains hyphens of its own
+    // (`计算器-1.0.0-beta`), so the first hyphen followed by digits and a
+    // parseable version is the one that separates name from version.
+    for (index, _) in stem.match_indices('-').rev() {
+        if index == 0 {
+            continue;
+        }
+        let tail = &stem[index + 1..];
+        if tail.chars().next().is_some_and(|c| c.is_ascii_digit()) && version_tuple(tail).is_some()
+        {
+            return stem[..index].to_string();
+        }
+    }
+    stem
+}
+
 /// Plugin identity from its relative path: `a/b.lua` -> `a/b`.
 fn plugin_identity(relative: &str) -> String {
     relative
@@ -558,6 +582,9 @@ pub struct Installed {
     /// The same `<author>/<name>-<version>.lua` was already there and has been
     /// replaced (reinstalling that exact version).
     pub replaced: bool,
+    /// Stem of the file the user picked. A plugin installed earlier under
+    /// another name or in the flat layout is still recognised as the same one.
+    pub source_stem: String,
 }
 
 /// Install a Lua script as `<author>/<name>-<version>.lua`, both taken from the
@@ -603,6 +630,7 @@ fn install_into(dir: &Path, source: &Path) -> anyhow::Result<Installed> {
         file_name,
         info,
         replaced,
+        source_stem: stem,
     })
 }
 
@@ -922,14 +950,25 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Enabled plugins that the freshly installed one replaces: same author and
-    /// declared name, different file.
+    /// Enabled plugins that the freshly installed one replaces: the same plugin
+    /// by declared author and name, or — for a file still sitting in the flat
+    /// layout, where there is no `<author>/` directory to tell them apart — the
+    /// same script by file name. That is how an early `calc.lua` is recognised
+    /// as today's `hemingtsai/计算器-1.0.0.lua`.
     pub fn superseded_by(&self, installed: &Installed) -> Vec<String> {
         let key = plugin_key(&installed.info);
+        let source_stem = installed.source_stem.to_lowercase();
         self.plugins
             .iter()
-            .filter(|plugin| plugin.file_name != installed.file_name)
-            .filter(|plugin| plugin_key(&plugin.info) == key && plugin.enabled)
+            .filter(|plugin| plugin.file_name != installed.file_name && plugin.enabled)
+            .filter(|plugin| {
+                let same_plugin = plugin_key(&plugin.info) == key;
+                let flat = !plugin.file_name.contains('/');
+                let same_script = flat
+                    && !source_stem.is_empty()
+                    && stem_without_version(&plugin.file_name).to_lowercase() == source_stem;
+                same_plugin || same_script
+            })
             .map(|plugin| plugin.file_name.clone())
             .collect()
     }
@@ -1493,12 +1532,52 @@ mod tests {
             file_name: "hemingtsai/计算器-1.1.0.lua".to_string(),
             info: info("1.1.0"),
             replaced: false,
+            source_stem: "计算器".to_string(),
         };
         assert_eq!(
             manager.superseded_by(&installed),
             vec!["hemingtsai/计算器-1.0.0.lua".to_string()],
             "only the enabled older version of the same plugin is switched off"
         );
+
+        // An earlier flat install of the same script (no metadata at all) is
+        // recognised by its file name, which is the state a user upgrading from
+        // the old layout is in.
+        let manager = PluginManager {
+            plugins: vec![
+                Plugin::unloaded("calc.lua".into(), PluginInfo::with_name("calc"), true),
+                Plugin::unloaded(
+                    "hemingtsai/别的-1.0.0.lua".into(),
+                    PluginInfo {
+                        author: Some("hemingtsai".to_string()),
+                        ..PluginInfo::with_name("别的")
+                    },
+                    true,
+                ),
+            ],
+            legacy: Vec::new(),
+        };
+        let installed = Installed {
+            file_name: "hemingtsai/计算器-1.0.0.lua".to_string(),
+            info: PluginInfo {
+                author: Some("hemingtsai".to_string()),
+                version: Some("1.0.0".to_string()),
+                ..PluginInfo::with_name("计算器")
+            },
+            replaced: false,
+            source_stem: "calc".to_string(),
+        };
+        assert_eq!(
+            manager.superseded_by(&installed),
+            vec!["calc.lua".to_string()],
+            "the same script under the old layout is switched off"
+        );
+
+        // Version suffixes are stripped before comparing stems.
+        assert_eq!(stem_without_version("a/计算器-1.0.0.lua"), "计算器");
+        assert_eq!(stem_without_version("a/计算器-1.0.0-beta.lua"), "计算器");
+        assert_eq!(stem_without_version("calc.lua"), "calc");
+        assert_eq!(stem_without_version("my-plugin.lua"), "my-plugin");
     }
 
     // ---------------------------------------------------------------- delete
