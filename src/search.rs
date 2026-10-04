@@ -24,7 +24,7 @@
 //! well-used app can therefore overtake a slightly better textual match — but
 //! never one that is a whole mark better, and never an app below the threshold.
 
-use crate::apps::{AppEntry, KeyKind, SearchKey, ascii_fold, mask_slot};
+use crate::apps::{AppEntry, KeyKind, SearchKey, fold_char};
 use crate::usage::UsageStore;
 use serde::{Deserialize, Serialize};
 
@@ -115,9 +115,12 @@ fn threshold_for(len: usize, tuning: &SearchTuning) -> u32 {
 fn kind_weight(kind: KeyKind, tuning: &SearchTuning) -> u32 {
     match kind {
         KeyKind::BundleFull => tuning.bundle_weight,
-        KeyKind::DisplayFull | KeyKind::DisplayAbbr | KeyKind::FolderFull | KeyKind::FolderAbbr => {
-            SCALE
-        }
+        KeyKind::DisplayFull
+        | KeyKind::DisplayAbbr
+        | KeyKind::DisplayLiteral
+        | KeyKind::FolderFull
+        | KeyKind::FolderAbbr
+        | KeyKind::FolderLiteral => SCALE,
     }
 }
 
@@ -150,30 +153,34 @@ impl Rows {
     }
 }
 
-/// The query split into segments of folded bytes: '/' separates segments and
-/// everything that folds to nothing (Chinese, spaces, punctuation) is dropped.
-fn query_segments(query: &str) -> Vec<Vec<u8>> {
-    let mut segments: Vec<Vec<u8>> = vec![Vec::new()];
+/// The query split into segments: '/' separates segments, Latin is folded and
+/// every other alphanumeric character — Chinese above all — is kept, so a
+/// Chinese keyboard searches Chinese names directly. Spaces and punctuation
+/// are dropped.
+fn query_segments(query: &str) -> Vec<Vec<char>> {
+    let mut segments: Vec<Vec<char>> = vec![Vec::new()];
     for ch in query.chars() {
         if ch == '/' {
             segments.push(Vec::new());
             continue;
         }
-        if let Some(byte) = ascii_fold(ch) {
+        if let Some(folded) = fold_char(ch) {
             segments
                 .last_mut()
                 .expect("there is always a segment")
-                .push(byte);
+                .push(folded);
         }
     }
     segments.retain(|segment| !segment.is_empty());
     segments
 }
 
-fn query_mask(segment: &[u8]) -> u64 {
-    segment
-        .iter()
-        .fold(0u64, |mask, byte| mask | (1u64 << mask_slot(*byte)))
+/// The distinct characters of a segment, sorted, for the pre-filter.
+fn query_present(segment: &[char]) -> Vec<char> {
+    let mut present = segment.to_vec();
+    present.sort_unstable();
+    present.dedup();
+    present
 }
 
 fn base_weight(starts: &[u32], index: usize, tuning: &SearchTuning) -> i32 {
@@ -187,8 +194,8 @@ fn base_weight(starts: &[u32], index: usize, tuning: &SearchTuning) -> i32 {
 /// Similarity of one query against one key, in thousandths, or 0 when the key
 /// cannot reach `threshold`.
 fn similarity(
-    q: &[u8],
-    q_mask: u64,
+    q: &[char],
+    q_present: &[char],
     key: &SearchKey,
     threshold: u32,
     tuning: &SearchTuning,
@@ -202,7 +209,10 @@ fn similarity(
 
     // A query character the key does not contain at all can only be deleted:
     // it loses its own mark and costs a penalty.
-    let absent = i64::from((q_mask & !key.mask).count_ones());
+    let absent = q_present
+        .iter()
+        .filter(|ch| key.present.binary_search(ch).is_err())
+        .count() as i64;
     if absent * 2 * i64::from(SCALE) > (n as i64) * i64::from(SCALE - threshold) {
         return 0;
     }
@@ -213,7 +223,7 @@ fn similarity(
 
     let penalty = tuning.pen_transpose.min(SCALE) as i32;
     rows.prepare(m + 1);
-    let key_chars: &[u8] = &key.chars;
+    let key_chars: &[char] = &key.chars;
     let starts: &[u32] = &key.starts;
 
     for i in 1..=n {
@@ -273,8 +283,8 @@ fn similarity(
 /// Best weighted (score, key length) among `keys`, or `None` when none reaches
 /// the threshold. Ties prefer the shorter key, i.e. the more specific match.
 fn best_key_score(
-    q: &[u8],
-    q_mask: u64,
+    q: &[char],
+    q_present: &[char],
     keys: &[SearchKey],
     threshold: u32,
     tuning: &SearchTuning,
@@ -282,7 +292,7 @@ fn best_key_score(
 ) -> Option<(u32, u32)> {
     let mut best: Option<(u32, u32)> = None;
     for key in keys {
-        let raw = similarity(q, q_mask, key, threshold, tuning, rows);
+        let raw = similarity(q, q_present, key, threshold, tuning, rows);
         if raw == 0 {
             continue;
         }
@@ -349,15 +359,15 @@ pub fn search_apps(query: &str, apps: &[AppEntry], ctx: &SearchContext) -> Vec<(
 
     if segments.len() == 1 {
         let segment = &segments[0];
-        let mask = query_mask(segment);
+        let present = query_present(segment);
         let threshold = threshold_for(segment.len(), ctx.tuning);
         for (index, app) in apps.iter().enumerate() {
             if !wanted(app) {
                 continue;
             }
-            if let Some((score, key_len)) =
-                best_key_score(segment, mask, &app.keys, threshold, ctx.tuning, &mut rows)
-            {
+            if let Some((score, key_len)) = best_key_score(
+                segment, &present, &app.keys, threshold, ctx.tuning, &mut rows,
+            ) {
                 scored.push((index, score + usage_boost(app, ctx), key_len));
             }
         }
@@ -376,7 +386,7 @@ pub fn search_apps(query: &str, apps: &[AppEntry], ctx: &SearchContext) -> Vec<(
             let mut matched_all = true;
 
             for segment in &segments {
-                let mask = query_mask(segment);
+                let present = query_present(segment);
                 let threshold = threshold_for(segment.len(), ctx.tuning);
                 let mut hit = None;
                 for component in cursor..component_count {
@@ -386,7 +396,7 @@ pub fn search_apps(query: &str, apps: &[AppEntry], ctx: &SearchContext) -> Vec<(
                         &app.folder_keys[component]
                     };
                     if let Some((score, len)) =
-                        best_key_score(segment, mask, keys, threshold, ctx.tuning, &mut rows)
+                        best_key_score(segment, &present, keys, threshold, ctx.tuning, &mut rows)
                     {
                         hit = Some((component, score, len));
                         break;
@@ -543,6 +553,45 @@ mod tests {
         let wechat = app("WeChat", "/Applications/WeChat.app", "微信");
         assert_eq!(score("abc", &wechat), None);
         assert_eq!(score("zzzz", &wechat), None);
+    }
+
+    #[test]
+    fn chinese_queries_match_chinese_names() {
+        let calculator = app(
+            "Calculator",
+            "/System/Applications/Calculator.app",
+            "计算器",
+        );
+        assert_eq!(score("计算器", &calculator), Some(SCALE), "exact");
+        assert_eq!(score("计算", &calculator), Some(SCALE), "prefix");
+        assert!(score("算器", &calculator).is_some(), "substring");
+        assert!(score("计器", &calculator).is_some(), "skipping a character");
+        // The pinyin keys stay available next to the literal one.
+        assert_eq!(score("jisuanqi", &calculator), Some(SCALE));
+        assert_eq!(score("jsq", &calculator), Some(SCALE));
+        assert_eq!(score("终端", &calculator), None, "unrelated Chinese");
+    }
+
+    #[test]
+    fn a_single_chinese_character_only_matches_the_start() {
+        let wechat = app("WeChat", "/Applications/WeChat.app", "微信");
+        assert_eq!(score("微", &wechat), Some(SCALE), "first character");
+        assert_eq!(score("信", &wechat), None, "second character, mid-name");
+    }
+
+    #[test]
+    fn a_query_can_mix_scripts() {
+        let notes = app("Notes", "/Applications/Notes.app", "微信 Notes");
+        assert_eq!(score("微信", &notes), Some(SCALE));
+        assert_eq!(
+            score("notes", &notes),
+            Some(SCALE),
+            "Latin part of the name"
+        );
+        assert!(score("微n", &notes).is_some(), "mixed query");
+        // The pinyin spelling of the Chinese part still works, with the Latin
+        // part appended.
+        assert!(score("weixinn", &notes).is_some());
     }
 
     #[test]

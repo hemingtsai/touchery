@@ -17,14 +17,18 @@ use pinyin::ToPinyinMulti;
 pub enum KeyKind {
     DisplayFull,
     DisplayAbbr,
+    /// The display name as written, Chinese characters included, so a Chinese
+    /// keyboard can search it directly.
+    DisplayLiteral,
     BundleFull,
     FolderFull,
     FolderAbbr,
+    FolderLiteral,
 }
 
-/// A spelling under construction: folded bytes, each flagged when it starts a
+/// A spelling under construction: characters, each flagged when it starts a
 /// word.
-type Marked = Vec<(u8, bool)>;
+type Marked = Vec<(char, bool)>;
 
 /// Max number of cartesian-product variants per string. App names are short;
 /// polyphonic characters multiply candidates but stay far below this.
@@ -32,33 +36,35 @@ const MAX_VARIANTS: usize = 64;
 
 /// A prepared search key.
 ///
-/// Everything is a-z0-9: Chinese characters are expanded to pinyin at index
-/// time and Latin accents are folded to their base letter, so the scorer never
-/// touches Unicode and can reject impossible matches with a bitmask.
+/// Latin text is folded to lowercase ASCII at index time; Chinese characters
+/// are indexed twice, once expanded to pinyin and once literally, so a Chinese
+/// keyboard matches as directly as a Latin one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchKey {
-    pub chars: Box<[u8]>,
-    /// One bit per character present: 0-25 for a-z, 26-35 for 0-9.
-    pub mask: u64,
+    pub chars: Box<[char]>,
+    /// The distinct characters of `chars`, sorted, for the O(log n) pre-filter
+    /// that rejects keys the query cannot match.
+    pub present: Box<[char]>,
     /// Positions in `chars` that count as word starts; always includes 0.
     pub starts: Box<[u32]>,
     pub kind: KeyKind,
 }
 
-/// Mask slot of a folded byte.
-pub(crate) fn mask_slot(byte: u8) -> u32 {
-    debug_assert!(byte.is_ascii_digit() || byte.is_ascii_lowercase());
-    if byte.is_ascii_digit() {
-        26 + u32::from(byte - b'0')
-    } else {
-        u32::from(byte - b'a')
+/// Fold a character for matching: Latin letters and digits become lowercase
+/// ASCII (accents folded, so é matches a keyboard that types e), every other
+/// alphanumeric character is kept as it is — that is what makes Chinese input
+/// work — and separators, spaces and punctuation yield `None`.
+pub(crate) fn fold_char(ch: char) -> Option<char> {
+    match ascii_fold(ch) {
+        Some(byte) => Some(byte as char),
+        None if ch.is_alphanumeric() => Some(ch.to_lowercase().next().unwrap_or(ch)),
+        None => None,
     }
 }
 
-/// Fold a character to its lowercase ASCII base letter or digit. Accented
-/// Latin letters (é → e) are folded so a Latin keyboard still matches a
-/// localized name; anything else (Chinese, punctuation, space) yields `None`.
-pub(crate) fn ascii_fold(ch: char) -> Option<u8> {
+/// Fold a Latin character to its lowercase ASCII base letter or digit.
+/// Accented Latin letters (é → e) are folded; anything else yields `None`.
+fn ascii_fold(ch: char) -> Option<u8> {
     let lower = ch.to_lowercase().next()?;
     if lower.is_ascii() {
         return lower.is_ascii_alphanumeric().then_some(lower as u8);
@@ -89,19 +95,20 @@ impl SearchKey {
         if marked.is_empty() {
             return None;
         }
-        let mut mask = 0u64;
         let mut starts = Vec::new();
         let mut chars = Vec::with_capacity(marked.len());
-        for (index, (byte, starts_word)) in marked.into_iter().enumerate() {
-            mask |= 1u64 << mask_slot(byte);
+        for (index, (ch, starts_word)) in marked.into_iter().enumerate() {
             if index == 0 || starts_word {
                 starts.push(index as u32);
             }
-            chars.push(byte);
+            chars.push(ch);
         }
+        let mut present = chars.clone();
+        present.sort_unstable();
+        present.dedup();
         Some(Self {
             chars: chars.into_boxed_slice(),
-            mask,
+            present: present.into_boxed_slice(),
             starts: starts.into_boxed_slice(),
             kind,
         })
@@ -131,16 +138,31 @@ fn variants_product(alternatives: Vec<Vec<Marked>>) -> Vec<Marked> {
     acc
 }
 
+/// The spellings of one name.
+struct NameVariants {
+    /// Pinyin of the Chinese characters (one spelling per reading) with the
+    /// Latin parts kept as they are.
+    full: Vec<Marked>,
+    /// One letter per Chinese character or Latin word.
+    abbr: Vec<Marked>,
+    /// The name as written: Chinese characters stay Chinese, Latin is folded.
+    literal: Marked,
+}
+
 /// Every spelling of `text`: the full one (Chinese characters expanded to
-/// pinyin, polyphonic characters contributing each reading) and the
-/// abbreviation (one letter per Chinese character, one per Latin word).
-fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
+/// pinyin, polyphonic characters contributing each reading), the abbreviation
+/// (one letter per Chinese character, one per Latin word) and the literal
+/// characters.
+fn name_variants(text: &str) -> NameVariants {
     let mut full_alternatives: Vec<Vec<Marked>> = Vec::new();
     let mut abbr_alternatives: Vec<Vec<Marked>> = Vec::new();
+    let mut literal: Marked = Vec::new();
     let mut next_starts_word = true;
     let mut previous_lower_or_digit = false;
 
     for ch in text.chars() {
+        let starts_word = next_starts_word || (ch.is_uppercase() && previous_lower_or_digit);
+
         if let Some(readings) = ch.to_pinyin_multi() {
             let mut fulls = Vec::new();
             let mut initials = Vec::new();
@@ -148,7 +170,7 @@ fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
                 let mut chars: Marked = Vec::new();
                 for (index, c) in reading.plain().chars().enumerate() {
                     if let Some(byte) = ascii_fold(c) {
-                        chars.push((byte, index == 0 && next_starts_word));
+                        chars.push((byte as char, index == 0 && starts_word));
                     }
                 }
                 if chars.is_empty() {
@@ -161,6 +183,10 @@ fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
                 full_alternatives.push(fulls);
                 abbr_alternatives.push(initials);
             }
+            // The character itself is what a Chinese keyboard types.
+            if let Some(c) = fold_char(ch) {
+                literal.push((c, starts_word));
+            }
             // A Chinese character is a syllable of its own: what follows does
             // not start a new word unless a separator says so.
             next_starts_word = false;
@@ -168,18 +194,17 @@ fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
             continue;
         }
 
-        match ascii_fold(ch) {
-            Some(byte) => {
-                let starts_word =
-                    next_starts_word || (ch.is_uppercase() && previous_lower_or_digit);
-                full_alternatives.push(vec![vec![(byte, starts_word)]]);
+        match fold_char(ch) {
+            Some(c) => {
+                full_alternatives.push(vec![vec![(c, starts_word)]]);
                 // Latin characters only reach the abbreviation at the start of
                 // a word: "Disk Utility" → "du", not "diskutility".
                 abbr_alternatives.push(vec![if starts_word {
-                    vec![(byte, true)]
+                    vec![(c, true)]
                 } else {
                     Vec::new()
                 }]);
+                literal.push((c, starts_word));
                 next_starts_word = false;
                 previous_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
             }
@@ -190,10 +215,11 @@ fn latin_variants(text: &str) -> (Vec<Marked>, Vec<Marked>) {
         }
     }
 
-    (
-        variants_product(full_alternatives),
-        variants_product(abbr_alternatives),
-    )
+    NameVariants {
+        full: variants_product(full_alternatives),
+        abbr: variants_product(abbr_alternatives),
+        literal,
+    }
 }
 
 /// Add `key` unless the same spelling is already present: the first kind wins,
@@ -205,18 +231,25 @@ fn push_unique_key(keys: &mut Vec<SearchKey>, key: SearchKey) {
     keys.push(key);
 }
 
-/// Search keys of one name: its full spellings plus, optionally, its
-/// abbreviation.
-fn keys_for_name(text: &str, full_kind: KeyKind, abbr_kind: Option<KeyKind>) -> Vec<SearchKey> {
-    let (fulls, abbrs) = latin_variants(text);
+/// Which spellings of a name to index, and under which kind.
+struct KeyKinds {
+    full: KeyKind,
+    abbr: Option<KeyKind>,
+    literal: Option<KeyKind>,
+}
+
+/// Search keys of one name: its full spellings, its abbreviation and its
+/// literal characters.
+fn keys_for_name(text: &str, kinds: KeyKinds) -> Vec<SearchKey> {
+    let variants = name_variants(text);
     let mut keys = Vec::new();
-    for marked in fulls {
-        if let Some(key) = SearchKey::from_marked(marked, full_kind) {
+    for marked in variants.full {
+        if let Some(key) = SearchKey::from_marked(marked, kinds.full) {
             push_unique_key(&mut keys, key);
         }
     }
-    if let Some(kind) = abbr_kind {
-        for marked in abbrs {
+    if let Some(kind) = kinds.abbr {
+        for marked in variants.abbr {
             // A one-letter abbreviation only repeats the first letter of the
             // full spelling, so it would cost work without adding matches.
             if marked.len() < 2 {
@@ -226,6 +259,11 @@ fn keys_for_name(text: &str, full_kind: KeyKind, abbr_kind: Option<KeyKind>) -> 
                 push_unique_key(&mut keys, key);
             }
         }
+    }
+    if let Some(kind) = kinds.literal
+        && let Some(key) = SearchKey::from_marked(variants.literal, kind)
+    {
+        push_unique_key(&mut keys, key);
     }
     keys
 }
@@ -239,8 +277,8 @@ pub struct AppEntry {
     pub path: String,
     /// Lowercased display name; used to collapse duplicate copies.
     pub display_name_lower: String,
-    /// Prepared keys of the app itself: the display name (full spelling and
-    /// abbreviation) and the bundle name.
+    /// Prepared keys of the app itself: the display name (pinyin spelling,
+    /// abbreviation and literal characters) and the bundle name.
     pub keys: Vec<SearchKey>,
     /// Prepared keys of each ancestor folder, outermost first. Only queries
     /// containing '/' consult these.
@@ -264,17 +302,36 @@ impl AppEntry {
         // "WeChat" is typed in full.
         let mut keys = keys_for_name(
             &display_name,
-            KeyKind::DisplayFull,
-            Some(KeyKind::DisplayAbbr),
+            KeyKinds {
+                full: KeyKind::DisplayFull,
+                abbr: Some(KeyKind::DisplayAbbr),
+                literal: Some(KeyKind::DisplayLiteral),
+            },
         );
-        for key in keys_for_name(&name, KeyKind::BundleFull, None) {
+        for key in keys_for_name(
+            &name,
+            KeyKinds {
+                full: KeyKind::BundleFull,
+                abbr: None,
+                literal: None,
+            },
+        ) {
             push_unique_key(&mut keys, key);
         }
 
         let (folder_names, in_app_dir) = build_folder_names(&path);
         let folder_keys = folder_names
             .iter()
-            .map(|folder| keys_for_name(folder, KeyKind::FolderFull, Some(KeyKind::FolderAbbr)))
+            .map(|folder| {
+                keys_for_name(
+                    folder,
+                    KeyKinds {
+                        full: KeyKind::FolderFull,
+                        abbr: Some(KeyKind::FolderAbbr),
+                        literal: Some(KeyKind::FolderLiteral),
+                    },
+                )
+            })
             .collect();
 
         Self {
@@ -658,10 +715,18 @@ mod tests {
         assert!(folders.is_empty());
     }
 
+    fn full_kinds(kind: KeyKind) -> KeyKinds {
+        KeyKinds {
+            full: kind,
+            abbr: None,
+            literal: None,
+        }
+    }
+
     fn key_spellings(text: &str, kind: KeyKind) -> Vec<String> {
-        keys_for_name(text, kind, None)
+        keys_for_name(text, full_kinds(kind))
             .iter()
-            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .map(|key| key.chars.iter().collect())
             .collect()
     }
 
@@ -675,7 +740,7 @@ mod tests {
         let spellings: Vec<String> = entry
             .keys
             .iter()
-            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .map(|key| key.chars.iter().copied().collect())
             .collect();
 
         // The display key and the identical bundle key are the same spelling,
@@ -698,7 +763,7 @@ mod tests {
                 .keys
                 .iter()
                 .filter(|key| key.kind == kind)
-                .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+                .map(|key| key.chars.iter().copied().collect())
                 .collect()
         };
 
@@ -712,20 +777,29 @@ mod tests {
         assert!(key_spellings("音乐", KeyKind::DisplayFull).contains(&"yinyue".to_string()));
         assert!(key_spellings("音乐", KeyKind::DisplayFull).contains(&"yinle".to_string()));
 
-        let initials: Vec<String> =
-            keys_for_name("音乐", KeyKind::DisplayAbbr, Some(KeyKind::DisplayAbbr))
-                .iter()
-                .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
-                .collect();
+        let initials: Vec<String> = keys_for_name(
+            "音乐",
+            KeyKinds {
+                full: KeyKind::DisplayAbbr,
+                abbr: Some(KeyKind::DisplayAbbr),
+                literal: None,
+            },
+        )
+        .iter()
+        .map(|key| key.chars.iter().collect())
+        .collect();
         assert!(initials.contains(&"yy".to_string()), "{initials:?}");
         assert!(initials.contains(&"yl".to_string()), "{initials:?}");
     }
 
     #[test]
     fn word_starts_survive_separators_and_camel_case() {
-        let (fulls, abbrs) = latin_variants("Disk Utility");
-        let spelling =
-            |marked: &Marked| -> String { marked.iter().map(|(byte, _)| *byte as char).collect() };
+        let NameVariants {
+            full: fulls,
+            abbr: abbrs,
+            ..
+        } = name_variants("Disk Utility");
+        let spelling = |marked: &Marked| -> String { marked.iter().map(|(ch, _)| *ch).collect() };
         let starts = |marked: &Marked| -> Vec<usize> {
             marked
                 .iter()
@@ -742,7 +816,7 @@ mod tests {
         assert_eq!(starts(full), vec![0, 4]);
         assert_eq!(spelling(&abbrs[0]), "du");
 
-        let (camel, _) = latin_variants("WeChat");
+        let NameVariants { full: camel, .. } = name_variants("WeChat");
         let full = camel
             .iter()
             .find(|marked| spelling(marked) == "wechat")
@@ -751,13 +825,63 @@ mod tests {
     }
 
     #[test]
-    fn masks_and_starts_cover_every_character() {
-        let key = &keys_for_name("A1b", KeyKind::DisplayFull, None)[0];
-        assert_eq!(&*key.chars, b"a1b");
-        assert_eq!(key.mask.count_ones(), 3);
-        assert!(key.mask & (1u64 << mask_slot(b'a')) != 0);
-        assert!(key.mask & (1u64 << mask_slot(b'1')) != 0);
+    fn presence_and_starts_cover_every_character() {
+        let key = &keys_for_name("A1b", full_kinds(KeyKind::DisplayFull))[0];
+        let spelling: String = key.chars.iter().collect();
+        assert_eq!(spelling, "a1b");
+        assert_eq!(&*key.present, &['1', 'a', 'b']);
         assert_eq!(&*key.starts, &[0]);
+    }
+
+    #[test]
+    fn chinese_names_are_indexed_as_pinyin_and_literally() {
+        let entry = AppEntry::with_display_name(
+            "WeChat".into(),
+            "/Applications/WeChat.app".into(),
+            Some("微信".into()),
+        );
+        let spellings: Vec<(String, KeyKind)> = entry
+            .keys
+            .iter()
+            .map(|key| (key.chars.iter().collect(), key.kind))
+            .collect();
+
+        assert!(
+            spellings.contains(&("weixin".to_string(), KeyKind::DisplayFull)),
+            "{spellings:?}"
+        );
+        assert!(
+            spellings.contains(&("微信".to_string(), KeyKind::DisplayLiteral)),
+            "{spellings:?}"
+        );
+        // The bundle name is Latin, so it only contributes its own spelling.
+        assert!(spellings.contains(&("wechat".to_string(), KeyKind::BundleFull)));
+    }
+
+    #[test]
+    fn mixed_names_keep_both_scripts_in_one_literal_key() {
+        let (fulls, _) = {
+            let variants = name_variants("微信 WeChat");
+            (variants.full, variants.abbr)
+        };
+        let literal: String = {
+            let variants = name_variants("微信 WeChat");
+            variants.literal.iter().map(|(ch, _)| *ch).collect()
+        };
+        assert!(
+            literal.contains('微') && literal.contains('信'),
+            "{literal}"
+        );
+        assert!(literal.ends_with("wechat"), "{literal}");
+        // The pinyin spelling keeps the Latin part too.
+        let spellings: Vec<String> = fulls
+            .iter()
+            .map(|marked| marked.iter().map(|(ch, _)| *ch).collect())
+            .collect();
+        assert!(
+            spellings.iter().any(|s| s == "weixinwechat"),
+            "{spellings:?}"
+        );
     }
 
     #[test]
@@ -770,7 +894,7 @@ mod tests {
         assert_eq!(entry.folder_keys.len(), 1);
         let folder: Vec<String> = entry.folder_keys[0]
             .iter()
-            .map(|key| key.chars.iter().map(|byte| *byte as char).collect())
+            .map(|key| key.chars.iter().copied().collect())
             .collect();
         assert!(folder.contains(&"devtools".to_string()), "{folder:?}");
         assert!(folder.contains(&"dt".to_string()), "{folder:?}");
