@@ -18,10 +18,10 @@ pub fn launcher_size() -> gpui::Size<Pixels> {
 
 // ---- settings window ----
 
-pub const SETTINGS_WIDTH: f32 = 560.0;
-pub const SETTINGS_HEIGHT: f32 = 520.0;
-pub const SETTINGS_MIN_WIDTH: f32 = 420.0;
-pub const SETTINGS_MIN_HEIGHT: f32 = 320.0;
+pub const SETTINGS_WIDTH: f32 = 780.0;
+pub const SETTINGS_HEIGHT: f32 = 580.0;
+pub const SETTINGS_MIN_WIDTH: f32 = 620.0;
+pub const SETTINGS_MIN_HEIGHT: f32 = 420.0;
 
 /// Initial content size of the control panel.
 pub fn settings_size() -> gpui::Size<Pixels> {

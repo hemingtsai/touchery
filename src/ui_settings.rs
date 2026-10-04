@@ -23,6 +23,8 @@ const MODIFIER_KEYS: &[&str] = &[
 ];
 
 pub struct SettingsView {
+    /// Which page the sidebar is showing.
+    page: SettingsPage,
     hotkey: HotkeyConfig,
     recording: bool,
     saved_at: Option<String>,
@@ -189,6 +191,7 @@ impl SettingsView {
         }
 
         let mut view = Self {
+            page: SettingsPage::General,
             hotkey: config.hotkey,
             recording: false,
             saved_at: None,
@@ -276,6 +279,7 @@ impl SettingsView {
         pal: &themes::Palette,
     ) -> impl IntoElement {
         div()
+            .flex_shrink_0()
             .flex()
             .flex_col()
             .gap_1()
@@ -435,6 +439,7 @@ impl SettingsView {
         let entity = cx.entity();
         div()
             .id(SharedString::from(format!("theme-row-{id}")))
+            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_3()
@@ -542,6 +547,7 @@ impl SettingsView {
         };
 
         div()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_3()
@@ -608,146 +614,333 @@ impl SettingsView {
     }
 }
 
-impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = themes::palette(cx);
-        let hotkey_display = crate::hotkey::format_hotkey(&self.hotkey);
-        self.refresh_plugin_rows(cx);
-        let plugins = self.plugin_rows.clone();
+/// Which page of the control panel is showing; the sidebar switches between
+/// them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    General,
+    Hotkey,
+    Search,
+    Usage,
+    Themes,
+    Plugins,
+}
 
-        let mut root = div()
-            .id("settings-root")
-            .size_full()
-            .w_full()
-            .bg(pal.panel_bg)
-            .p_6()
+impl SettingsPage {
+    const ALL: [SettingsPage; 6] = [
+        SettingsPage::General,
+        SettingsPage::Hotkey,
+        SettingsPage::Search,
+        SettingsPage::Usage,
+        SettingsPage::Themes,
+        SettingsPage::Plugins,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsPage::General => "通用",
+            SettingsPage::Hotkey => "快捷键",
+            SettingsPage::Search => "搜索",
+            SettingsPage::Usage => "使用记录",
+            SettingsPage::Themes => "主题",
+            SettingsPage::Plugins => "插件",
+        }
+    }
+}
+
+/// Sidebar width, in the spirit of the reference layout.
+const SIDEBAR_WIDTH: f32 = 172.0;
+
+/// A section heading inside a page. Long paths are kept on one line and
+/// ellipsized instead of stretching the column.
+fn section_title(text: String, pal: &themes::Palette) -> impl IntoElement {
+    div().flex_shrink_0().overflow_hidden().child(
+        div()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .whitespace_nowrap()
+            .truncate()
+            .text_color(pal.text_secondary)
+            .child(text),
+    )
+}
+
+/// A settings row: title, hint and a trailing control, 56-ish pixels tall and
+/// never squeezed by the scrolling column.
+fn setting_row(
+    pal: &themes::Palette,
+    title: &str,
+    hint: &str,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap_3()
+        .py_2()
+        .px_3()
+        .rounded_md()
+        .overflow_hidden()
+        .bg(pal.row_bg)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap_y_0p5()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .whitespace_nowrap()
+                        .truncate()
+                        .text_color(pal.text_primary)
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .whitespace_nowrap()
+                        .truncate()
+                        .text_color(pal.text_secondary)
+                        .child(hint.to_string()),
+                ),
+        )
+        .child(control)
+}
+
+impl SettingsView {
+    /// Sidebar: the app name and one entry per page, with the row counts that
+    /// are worth showing at a glance.
+    fn render_sidebar(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.page;
+        let usage_count = crate::usage_store(cx).count();
+        let plugin_count = self.plugin_rows.len();
+        let entity = cx.entity();
+
+        let mut nav = div().flex().flex_col().gap_1().px_2().pb_2();
+        for page in SettingsPage::ALL {
+            let active = page == selected;
+            let count = match page {
+                SettingsPage::Usage => Some(usage_count),
+                SettingsPage::Plugins => Some(plugin_count),
+                _ => None,
+            };
+            let entity = entity.clone();
+            nav = nav.child(
+                div()
+                    .id(SharedString::from(format!("settings-nav-{}", page.label())))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(active, |row| row.bg(pal.row_bg))
+                    .hover(|row| row.bg(pal.hover_bg))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(if active {
+                                pal.text_primary
+                            } else {
+                                pal.text_secondary
+                            })
+                            .child(page.label()),
+                    )
+                    .children(count.filter(|n| *n > 0).map(|n| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.0))
+                            .text_color(pal.text_secondary)
+                            .child(n.to_string())
+                    }))
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |view, cx| {
+                            view.page = page;
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+
+        div()
+            .flex_shrink_0()
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
             .flex()
             .flex_col()
-            .gap_4()
-            .overflow_y_scroll();
-
-        // Section titles can contain long paths; keep them on one line and
-        // ellipsize instead of stretching the column.
-        let title = |text: String| {
-            div().overflow_hidden().child(
-                div()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .whitespace_nowrap()
-                    .truncate()
-                    .text_color(pal.text_secondary)
-                    .child(text),
-            )
-        };
-
-        // ---- general section ----
-        let launch_enabled = crate::autostart::is_enabled();
-        let entity = cx.entity();
-        root = root.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(title("通用".to_string()))
-                .child(
+            .border_r_1()
+            .border_color(pal.card_border)
+            .child(
+                div().flex_shrink_0().px_4().py_3().child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap_3()
-                        .py_2()
-                        .px_3()
-                        .rounded_md()
-                        .overflow_hidden()
-                        .bg(pal.row_bg)
+                        .items_baseline()
+                        .gap_2()
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap_y_0p5()
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .whitespace_nowrap()
-                                        .truncate()
-                                        .text_color(pal.text_primary)
-                                        .child("登录时自动启动"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .whitespace_nowrap()
-                                        .truncate()
-                                        .text_color(pal.text_secondary)
-                                        .child(
-                                            "通过用户 LaunchAgent 实现；移动应用位置后需重新开启",
-                                        ),
-                                ),
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(pal.text_primary)
+                                .child("Touchery"),
                         )
                         .child(
-                            Switch::new("launch-at-login")
-                                .flex_shrink_0()
-                                .checked(launch_enabled)
-                                .on_click(move |checked: &bool, _window, cx| {
-                                    let result = crate::autostart::set_enabled(*checked);
-                                    entity.update(cx, |_, cx| {
-                                        if let Err(e) = result {
-                                            eprintln!("[autostart] failed: {e:#}");
-                                        }
-                                        cx.notify();
-                                    });
-                                }),
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(pal.text_secondary)
+                                .child(env!("CARGO_PKG_VERSION")),
                         ),
                 ),
+            )
+            .child(nav)
+    }
+
+    /// The header of the content pane: the page name, and the shortcut the
+    /// launcher answers to on the right.
+    fn render_header(&self, pal: &themes::Palette) -> impl IntoElement {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(pal.card_border)
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(pal.text_primary)
+                    .child(self.page.label()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(12.0))
+                    .text_color(pal.text_secondary)
+                    .child(crate::hotkey::format_hotkey(&self.hotkey)),
+            )
+    }
+
+    /// 通用: the two switches that change how the app behaves.
+    fn page_general(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let launch_enabled = crate::autostart::is_enabled();
+        let entity = cx.entity();
+        let launch_row = setting_row(
+            pal,
+            "登录时自动启动",
+            "通过用户 LaunchAgent 实现；移动应用位置后需重新开启",
+            Switch::new("launch-at-login")
+                .flex_shrink_0()
+                .checked(launch_enabled)
+                .on_click(move |checked: &bool, _window, cx| {
+                    let result = crate::autostart::set_enabled(*checked);
+                    entity.update(cx, |_, cx| {
+                        if let Err(e) = result {
+                            eprintln!("[autostart] failed: {e:#}");
+                        }
+                        cx.notify();
+                    });
+                }),
         );
 
-        // ---- hotkey section ----
-        root = root.child(
+        let apps_only = crate::config::Config::load().apps_only;
+        let entity = cx.entity();
+        let apps_only_row = setting_row(
+            pal,
+            "仅搜索应用程序",
+            "只索引 Application 文件夹内的应用，排除系统深处的 helper；下次唤起生效",
+            Switch::new("apps-only-toggle")
+                .flex_shrink_0()
+                .checked(apps_only)
+                .on_click(move |checked: &bool, _window, cx| {
+                    let result = crate::config::modify(|config| {
+                        config.apps_only = *checked;
+                    });
+                    entity.update(cx, |_, cx| {
+                        if let Err(e) = result {
+                            eprintln!("[settings] failed to save apps_only: {e}");
+                        }
+                        cx.notify();
+                    });
+                }),
+        );
+
+        vec![
             div()
+                .flex_shrink_0()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(title("启动器快捷键".to_string()))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .bg(pal.input_bg)
-                                .border_1()
-                                .border_color(if self.recording {
-                                    pal.accent_info
-                                } else {
-                                    pal.input_border
-                                })
-                                .text_size(px(13.0))
-                                .text_color(pal.text_primary)
-                                .child(if self.recording {
-                                    "录制中…".to_string()
-                                } else {
-                                    hotkey_display
-                                }),
-                        )
-                        .child(
-                            Button::new("record")
-                                .label(if self.recording {
-                                    "取消"
-                                } else {
-                                    "修改快捷键"
-                                })
-                                .when(self.recording, |b| b.primary())
-                                .on_click(cx.listener(Self::start_recording)),
-                        ),
-                )
+                .child(section_title("启动与索引".to_string(), pal))
+                .child(launch_row)
+                .child(apps_only_row)
+                .into_any_element(),
+        ]
+    }
+
+    /// 快捷键: record a new global shortcut.
+    fn page_hotkey(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let hotkey_display = crate::hotkey::format_hotkey(&self.hotkey);
+        let row = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap_3()
+            .py_2()
+            .px_3()
+            .rounded_md()
+            .overflow_hidden()
+            .bg(pal.row_bg)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(pal.input_bg)
+                    .border_1()
+                    .border_color(if self.recording {
+                        pal.accent_info
+                    } else {
+                        pal.input_border
+                    })
+                    .text_size(px(13.0))
+                    .text_color(pal.text_primary)
+                    .child(if self.recording {
+                        "录制中…".to_string()
+                    } else {
+                        hotkey_display
+                    }),
+            )
+            .child(
+                Button::new("record")
+                    .label(if self.recording {
+                        "取消"
+                    } else {
+                        "修改快捷键"
+                    })
+                    .when(self.recording, |button| button.primary())
+                    .on_click(cx.listener(Self::start_recording)),
+            );
+
+        let mut rows: Vec<AnyElement> = vec![
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title("启动器快捷键".to_string(), pal))
+                .child(row)
                 .children(self.saved_at.clone().map(|msg| {
                     div()
                         .text_size(px(12.0))
@@ -759,102 +952,28 @@ impl Render for SettingsView {
                         .text_size(px(12.0))
                         .text_color(pal.accent_error)
                         .child(msg)
-                })),
-        );
-
-        // ---- theme section ----
-        let active_stem = cx.global::<crate::themes::ThemeState>().active_stem.clone();
-        let user_themes = cx.global::<crate::themes::ThemeState>().user_themes.clone();
-
-        let mut theme_section = div().flex().flex_col().gap_2().child(title(
-            "主题 — 目录: ~/Library/Application Support/touchery/themes".to_string(),
-        ));
-
-        // Built-in option (stem = None).
-        theme_section = theme_section.child(self.render_theme_row(
-            "builtin",
-            "内置主题（自动亮暗色）",
-            active_stem.is_none(),
-            &pal,
-            None,
-            cx,
-        ));
-
-        for t in &user_themes {
-            theme_section = theme_section.child(self.render_theme_row(
-                &t.stem,
-                t.display_name(),
-                active_stem.as_deref() == Some(t.stem.as_str()),
-                &pal,
-                Some(t.stem.clone()),
-                cx,
-            ));
-        }
-        root = root.child(theme_section);
-
-        // ---- apps-only toggle section ----
-        let apps_only = crate::config::Config::load().apps_only;
-        let entity = cx.entity();
-        root = root.child(
+                }))
+                .into_any_element(),
+        ];
+        rows.push(
             div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .py_2()
-                .px_3()
-                .rounded_md()
-                .overflow_hidden()
-                .bg(pal.row_bg)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap_y_0p5()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .whitespace_nowrap()
-                                .truncate()
-                                .text_color(pal.text_primary)
-                                .child("仅搜索应用程序"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .whitespace_nowrap()
-                                .truncate()
-                                .text_color(pal.text_secondary)
-                                .child("只在 Application 文件夹内索引，支持 路径/模糊 搜索（如 shiyong/cipan）；下次唤起生效"),
-                        ),
-                )
-                .child(
-                    Switch::new("apps-only-toggle")
-                        .flex_shrink_0()
-                        .checked(apps_only)
-                        .on_click(move |checked: &bool, _window, cx| {
-                            let result = crate::config::modify(|config| {
-                                config.apps_only = *checked;
-                            });
-                            entity.update(cx, |_, cx| {
-                                if let Err(e) = result {
-                                    eprintln!("[settings] failed to save apps_only: {e}");
-                                }
-                                cx.notify();
-                            });
-                        }),
-                ),
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .text_color(pal.text_secondary)
+                .child("至少一个 ⌘/⌥/⌃ 修饰键；⇧ 单独使用会拦截普通大写输入。若与其他应用冲突，注册失败会显示在上面并恢复原快捷键")
+                .into_any_element(),
         );
+        rows
+    }
 
-        // ---- search tuning section ----
+    /// 搜索: how the launcher matches and how much habit counts.
+    fn page_search(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let tuning = self.tuning;
-        let mut tuning_section = div()
+        let knobs = div()
+            .flex_shrink_0()
             .flex()
             .flex_col()
             .gap_3()
-            .child(title("搜索调参".to_string()))
             .child(
                 div()
                     .text_size(px(11.0))
@@ -866,92 +985,90 @@ impl Render for SettingsView {
                 "1 个字符要多高分才列出；1000 表示只有完全一致的词首",
                 tuning.threshold_1,
                 &self.sliders.threshold_1,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "双字符阈值",
                 "2 个字符的查询门槛，默认允许缩写",
                 tuning.threshold_2,
                 &self.sliders.threshold_2,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "三字符及以上阈值",
                 "长查询的门槛，默认容忍一处错拼或换位",
                 tuning.threshold_3,
                 &self.sliders.threshold_3,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "中段命中权重",
                 "命中词中（非词首、非连续）时的得分，调低会让前缀/缩写更占优",
                 tuning.match_mid,
                 &self.sliders.match_mid,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "换位罚分（每对）",
                 "相邻两个字母打反的代价；调小则错拼更容易命中",
                 tuning.pen_transpose,
                 &self.sliders.pen_transpose,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "bundle 名称权重",
                 "用原始 bundle 名命中时的折扣，低于显示名",
                 tuning.bundle_weight,
                 &self.sliders.bundle_weight,
-                &pal,
+                pal,
             ))
             .child(self.render_knob(
                 "习惯加成上限",
                 "使用次数与最近使用最多能加分多少；0 表示完全按文本相似度排序",
                 tuning.usage_boost_max,
                 &self.sliders.usage_boost_max,
-                &pal,
-            ));
-
-        tuning_section = tuning_section.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    Button::new("tuning-reset")
-                        .label("恢复默认")
-                        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
-                            view.reset_tuning(window, cx);
-                        })),
-                )
-                .children(self.tuning_saved_at.clone().map(|msg| {
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(pal.accent_info)
-                        .child(msg)
-                })),
-        );
-        root = root.child(tuning_section);
-
-        // ---- usage history section ----
-        let usage_rows = self.usage_rows(cx);
-        let usage_count = crate::usage_store(cx).count();
-        let mut usage_section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(title(format!(
-                "使用记录 ({}) — 文件: ~/Library/Application Support/touchery/usage.json",
-                usage_count
-            )))
+                pal,
+            ))
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(pal.text_secondary)
-                    .child("打开启动器时按习惯排序：用得越多、越近，越靠前；相似度差距较大时仍以文本匹配为准"),
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        Button::new("tuning-reset")
+                            .label("恢复默认")
+                            .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+                                view.reset_tuning(window, cx);
+                            })),
+                    )
+                    .children(self.tuning_saved_at.clone().map(|msg| {
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(pal.accent_info)
+                            .child(msg)
+                    })),
             );
 
-        if usage_rows.is_empty() {
-            usage_section = usage_section.child(
+        vec![
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title("排序与容错".to_string(), pal))
+                .child(knobs)
+                .into_any_element(),
+        ]
+    }
+
+    /// 使用记录: what the habit ranking knows, and how to forget it.
+    fn page_usage(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let rows = self.usage_rows(cx);
+        let count = crate::usage_store(cx).count();
+
+        let mut list = div().flex_shrink_0().flex().flex_col().gap_1();
+        if rows.is_empty() {
+            list = list.child(
                 div()
                     .py_2()
                     .text_size(px(12.0))
@@ -959,17 +1076,18 @@ impl Render for SettingsView {
                     .child("还没有记录，从启动器打开应用后就会出现"),
             );
         } else {
-            for row in &usage_rows {
-                usage_section = usage_section.child(
+            for row in &rows {
+                list = list.child(
                     div()
+                        .flex_shrink_0()
                         .flex()
                         .items_center()
                         .gap_3()
                         .py_2()
                         .px_3()
                         .rounded_md()
-                        .bg(pal.row_bg)
                         .overflow_hidden()
+                        .bg(pal.row_bg)
                         .child(
                             div().flex_1().min_w(px(0.)).overflow_hidden().child(
                                 div()
@@ -992,30 +1110,95 @@ impl Render for SettingsView {
             }
         }
 
-        usage_section = usage_section.child(
-            div().flex().items_center().gap_3().child(
-                Button::new("usage-clear")
-                    .label("清除使用记录")
-                    .danger()
-                    .on_click(cx.listener(|_view, _: &ClickEvent, _window, cx| {
-                        match crate::usage_store(cx).clear() {
-                            Ok(()) => {}
-                            Err(e) => eprintln!("[settings] failed to clear usage: {e}"),
-                        }
-                        cx.notify();
-                    })),
-            ),
-        );
-        root = root.child(usage_section);
+        vec![
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title(
+                    format!("习惯最强的应用（共 {count} 条）"),
+                    pal,
+                ))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(pal.text_secondary)
+                        .child("打开启动器时按习惯排序：用得越多、越近，越靠前；相似度差距较大时仍以文本匹配为准"),
+                )
+                .child(list)
+                .child(
+                    div().flex().items_center().gap_3().child(
+                        Button::new("usage-clear")
+                            .label("清除使用记录")
+                            .danger()
+                            .on_click(cx.listener(|_view, _: &ClickEvent, _window, cx| {
+                                match crate::usage_store(cx).clear() {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        eprintln!("[settings] failed to clear usage: {e}")
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(pal.text_secondary)
+                        .child("文件: ~/Library/Application Support/touchery/usage.json"),
+                )
+                .into_any_element(),
+        ]
+    }
 
-        // ---- plugins section ----
-        let mut section = div().flex().flex_col().gap_2().child(title(format!(
-            "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
-            plugins.len()
-        )));
+    /// 主题: pick one of the Lua themes.
+    fn page_themes(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let active_stem = cx.global::<crate::themes::ThemeState>().active_stem.clone();
+        let user_themes = cx.global::<crate::themes::ThemeState>().user_themes.clone();
 
+        let mut list = div().flex_shrink_0().flex().flex_col().gap_2();
+        list = list.child(self.render_theme_row(
+            "builtin",
+            "内置主题（自动亮暗色）",
+            active_stem.is_none(),
+            pal,
+            None,
+            cx,
+        ));
+        for theme in &user_themes {
+            list = list.child(self.render_theme_row(
+                &theme.stem,
+                theme.display_name(),
+                active_stem.as_deref() == Some(theme.stem.as_str()),
+                pal,
+                Some(theme.stem.clone()),
+                cx,
+            ));
+        }
+
+        vec![
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title(
+                    "主题 — 目录: ~/Library/Application Support/touchery/themes".to_string(),
+                    pal,
+                ))
+                .child(list)
+                .into_any_element(),
+        ]
+    }
+
+    /// 插件: what is loaded and what each plugin is doing.
+    fn page_plugins(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let plugins = self.plugin_rows.clone();
+        let mut list = div().flex_shrink_0().flex().flex_col().gap_2();
         if plugins.is_empty() {
-            section = section.child(
+            list = list.child(
                 div()
                     .py_3()
                     .text_size(px(12.0))
@@ -1023,13 +1206,72 @@ impl Render for SettingsView {
                     .child("暂无插件，将 .lua 文件放入上述目录后重启应用"),
             );
         } else {
-            for p in &plugins {
-                section = section.child(self.render_plugin_row(p, &pal, cx));
+            for plugin in &plugins {
+                list = list.child(self.render_plugin_row(plugin, pal, cx));
             }
         }
-        root = root.child(section);
 
-        root
+        vec![
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title(format!("插件 ({})", plugins.len()), pal))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(pal.text_secondary)
+                        .child("目录: ~/Library/Application Support/touchery/plugins"),
+                )
+                .child(list)
+                .into_any_element(),
+        ]
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = themes::palette(cx);
+        self.refresh_plugin_rows(cx);
+
+        let rows = match self.page {
+            SettingsPage::General => self.page_general(&pal, cx),
+            SettingsPage::Hotkey => self.page_hotkey(&pal, cx),
+            SettingsPage::Search => self.page_search(&pal, cx),
+            SettingsPage::Usage => self.page_usage(&pal, cx),
+            SettingsPage::Themes => self.page_themes(&pal, cx),
+            SettingsPage::Plugins => self.page_plugins(&pal, cx),
+        };
+
+        div()
+            .id("settings-root")
+            .size_full()
+            .w_full()
+            .flex()
+            .bg(pal.panel_bg)
+            .child(self.render_sidebar(&pal, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_header(&pal))
+                    .child(
+                        div()
+                            .id("settings-content")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .p_5()
+                            .overflow_y_scroll()
+                            .children(rows),
+                    ),
+            )
     }
 }
 
