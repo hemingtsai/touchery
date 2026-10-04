@@ -1,26 +1,92 @@
 use crate::config::{Config, HotkeyConfig};
+use crate::search::SearchTuning;
 use crate::themes;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::switch::Switch;
 
 /// Keys that are pure modifier presses and cannot form a hotkey by themselves.
 const MODIFIER_KEYS: &[&str] = &[
-    "shift", "control", "alt", "altgraph", "super", "cmd", "platform", "function", "fn",
-    "capslock", "caps_lock",
+    "shift",
+    "control",
+    "alt",
+    "altgraph",
+    "super",
+    "cmd",
+    "platform",
+    "function",
+    "fn",
+    "capslock",
+    "caps_lock",
 ];
 
 pub struct SettingsView {
     hotkey: HotkeyConfig,
     recording: bool,
     saved_at: Option<String>,
+    /// The scoring knobs currently in effect, mirrored by `sliders`.
+    tuning: SearchTuning,
+    tuning_saved_at: Option<String>,
+    sliders: TuningSliders,
     /// Cached plugin rows. Refreshed from a timer (and opportunistically from
     /// render) so painting never waits on the plugin lock, which a runaway
     /// plugin can hold for an unbounded time.
     plugin_rows: Vec<PluginRowView>,
     _keystroke_subscription: Subscription,
     _plugin_refresh_task: Task<()>,
+    _tuning_subscriptions: Vec<Subscription>,
+}
+
+/// The seven sliders of the search-tuning section, in display order.
+struct TuningSliders {
+    threshold_1: Entity<SliderState>,
+    threshold_2: Entity<SliderState>,
+    threshold_3: Entity<SliderState>,
+    match_mid: Entity<SliderState>,
+    pen_transpose: Entity<SliderState>,
+    bundle_weight: Entity<SliderState>,
+    usage_boost_max: Entity<SliderState>,
+}
+
+impl TuningSliders {
+    fn values(&self, cx: &App) -> SearchTuning {
+        let value = |state: &Entity<SliderState>| -> u32 {
+            let raw = match state.read(cx).value() {
+                SliderValue::Single(value) => value,
+                SliderValue::Range(_, end) => end,
+            };
+            raw.round().max(0.0) as u32
+        };
+        SearchTuning {
+            threshold_1: value(&self.threshold_1),
+            threshold_2: value(&self.threshold_2),
+            threshold_3: value(&self.threshold_3),
+            match_mid: value(&self.match_mid),
+            pen_transpose: value(&self.pen_transpose),
+            bundle_weight: value(&self.bundle_weight),
+            usage_boost_max: value(&self.usage_boost_max),
+        }
+        .clamped()
+    }
+
+    fn set(&self, tuning: SearchTuning, window: &mut Window, cx: &mut App) {
+        let pairs = [
+            (&self.threshold_1, tuning.threshold_1),
+            (&self.threshold_2, tuning.threshold_2),
+            (&self.threshold_3, tuning.threshold_3),
+            (&self.match_mid, tuning.match_mid),
+            (&self.pen_transpose, tuning.pen_transpose),
+            (&self.bundle_weight, tuning.bundle_weight),
+            (&self.usage_boost_max, tuning.usage_boost_max),
+        ];
+        for (state, value) in pairs {
+            state.update(cx, |state, cx| {
+                state.set_value(value as f32, window, cx);
+            });
+        }
+    }
 }
 
 /// Snapshot row of a plugin for rendering.
@@ -65,16 +131,132 @@ impl SettingsView {
             }
         });
 
+        // One slider per scoring knob; moving one saves the whole set.
+        let tuning = crate::search_tuning(cx);
+        let slider = |cx: &mut Context<Self>, value: u32, max: u32, step: f32| {
+            cx.new(|_| {
+                SliderState::new()
+                    .min(0.0)
+                    .max(max as f32)
+                    .step(step)
+                    .default_value(value as f32)
+            })
+        };
+        let sliders = TuningSliders {
+            threshold_1: slider(cx, tuning.threshold_1, 1000, 10.0),
+            threshold_2: slider(cx, tuning.threshold_2, 1000, 10.0),
+            threshold_3: slider(cx, tuning.threshold_3, 1000, 10.0),
+            match_mid: slider(cx, tuning.match_mid, 1000, 10.0),
+            pen_transpose: slider(cx, tuning.pen_transpose, 1000, 10.0),
+            bundle_weight: slider(cx, tuning.bundle_weight, 1000, 10.0),
+            usage_boost_max: slider(cx, tuning.usage_boost_max, 200, 5.0),
+        };
+        let mut tuning_subscriptions = Vec::new();
+        for state in [
+            &sliders.threshold_1,
+            &sliders.threshold_2,
+            &sliders.threshold_3,
+            &sliders.match_mid,
+            &sliders.pen_transpose,
+            &sliders.bundle_weight,
+            &sliders.usage_boost_max,
+        ] {
+            tuning_subscriptions.push(cx.subscribe(
+                state,
+                |view, _state, event: &SliderEvent, cx| {
+                    view.on_tuning_changed(event, cx);
+                },
+            ));
+        }
+
         let mut view = Self {
             hotkey: config.hotkey,
             recording: false,
             saved_at: None,
+            tuning,
+            tuning_saved_at: None,
+            sliders,
             plugin_rows: Vec::new(),
             _keystroke_subscription: keystroke_subscription,
             _plugin_refresh_task: plugin_refresh_task,
+            _tuning_subscriptions: tuning_subscriptions,
         };
         view.refresh_plugin_rows(cx);
         view
+    }
+
+    /// A slider moved: apply the whole set live and persist it.
+    fn on_tuning_changed(&mut self, _event: &SliderEvent, cx: &mut Context<Self>) {
+        let tuning = self.sliders.values(cx);
+        if tuning == self.tuning {
+            return; // dragging within one step changes nothing
+        }
+        self.tuning = tuning;
+        crate::set_search_tuning(cx, tuning);
+        self.tuning_saved_at = Some(
+            match crate::config::modify(|config| config.search = tuning) {
+                Ok(()) => "已保存 ✓".to_string(),
+                Err(e) => format!("保存失败: {e}"),
+            },
+        );
+        cx.notify();
+    }
+
+    /// Put every knob back to its default.
+    fn reset_tuning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let defaults = SearchTuning::default();
+        self.sliders.set(defaults, window, cx);
+        self.tuning = defaults;
+        crate::set_search_tuning(cx, defaults);
+        self.tuning_saved_at = Some(
+            match crate::config::modify(|config| config.search = defaults) {
+                Ok(()) => "已恢复默认 ✓".to_string(),
+                Err(e) => format!("保存失败: {e}"),
+            },
+        );
+        cx.notify();
+    }
+
+    /// One labelled slider row.
+    fn render_knob(
+        &self,
+        label: &str,
+        hint: &str,
+        value: u32,
+        state: &Entity<SliderState>,
+        pal: &themes::Palette,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(pal.text_primary)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.0))
+                            .text_color(pal.text_secondary)
+                            .child(value.to_string()),
+                    ),
+            )
+            .child(Slider::new(state).w_full())
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(pal.text_secondary)
+                    .child(hint.to_string()),
+            )
     }
 
     fn start_recording(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -211,28 +393,32 @@ impl SettingsView {
             .px_3()
             .rounded_md()
             .overflow_hidden()
-            .bg(if is_active { pal.row_bg } else { gpui::transparent_black() })
+            .bg(if is_active {
+                pal.row_bg
+            } else {
+                gpui::transparent_black()
+            })
             .border_1()
-            .border_color(if is_active { pal.accent_info } else { pal.input_border })
+            .border_color(if is_active {
+                pal.accent_info
+            } else {
+                pal.input_border
+            })
             .hover(|s| s.bg(pal.hover_bg))
             .cursor_pointer()
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .whitespace_nowrap()
-                            .truncate()
-                            .text_color(if is_active {
-                                pal.text_primary
-                            } else {
-                                pal.text_secondary
-                            })
-                            .child(label.to_string()),
-                    ),
+                div().flex_1().min_w(px(0.)).overflow_hidden().child(
+                    div()
+                        .text_size(px(13.0))
+                        .whitespace_nowrap()
+                        .truncate()
+                        .text_color(if is_active {
+                            pal.text_primary
+                        } else {
+                            pal.text_secondary
+                        })
+                        .child(label.to_string()),
+                ),
             )
             .child(
                 div()
@@ -318,18 +504,14 @@ impl SettingsView {
             .child(
                 // Name column: flex_1 so it shrinks instead of pushing the
                 // status/switch out of the row.
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .whitespace_nowrap()
-                            .truncate()
-                            .text_color(pal.text_primary)
-                            .child(plugin.name.clone()),
-                    ),
+                div().flex_1().min_w(px(0.)).overflow_hidden().child(
+                    div()
+                        .text_size(px(13.0))
+                        .whitespace_nowrap()
+                        .truncate()
+                        .text_color(pal.text_primary)
+                        .child(plugin.name.clone()),
+                ),
             )
             .child(
                 div()
@@ -398,17 +580,15 @@ impl Render for SettingsView {
         // Section titles can contain long paths; keep them on one line and
         // ellipsize instead of stretching the column.
         let title = |text: String| {
-            div()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .whitespace_nowrap()
-                        .truncate()
-                        .text_color(pal.text_secondary)
-                        .child(text),
-                )
+            div().overflow_hidden().child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .whitespace_nowrap()
+                    .truncate()
+                    .text_color(pal.text_secondary)
+                    .child(text),
+            )
         };
 
         // ---- general section ----
@@ -452,7 +632,9 @@ impl Render for SettingsView {
                                         .whitespace_nowrap()
                                         .truncate()
                                         .text_color(pal.text_secondary)
-                                        .child("通过用户 LaunchAgent 实现；移动应用位置后需重新开启"),
+                                        .child(
+                                            "通过用户 LaunchAgent 实现；移动应用位置后需重新开启",
+                                        ),
                                 ),
                         )
                         .child(
@@ -532,10 +714,7 @@ impl Render for SettingsView {
         );
 
         // ---- theme section ----
-        let active_stem = cx
-            .global::<crate::themes::ThemeState>()
-            .active_stem
-            .clone();
+        let active_stem = cx.global::<crate::themes::ThemeState>().active_stem.clone();
         let user_themes = cx.global::<crate::themes::ThemeState>().user_themes.clone();
 
         let mut theme_section = div().flex().flex_col().gap_2().child(title(
@@ -619,6 +798,90 @@ impl Render for SettingsView {
                         }),
                 ),
         );
+
+        // ---- search tuning section ----
+        let tuning = self.tuning;
+        let mut tuning_section = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(title("搜索调参".to_string()))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(pal.text_secondary)
+                    .child("单位与打分一致：1000 = 满分（词首或连续匹配）。拖动即时生效，下次输入即按新参数排序"),
+            )
+            .child(self.render_knob(
+                "单字符查询阈值",
+                "1 个字符要多高分才列出；1000 表示只有完全一致的词首",
+                tuning.threshold_1,
+                &self.sliders.threshold_1,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "双字符阈值",
+                "2 个字符的查询门槛，默认允许缩写",
+                tuning.threshold_2,
+                &self.sliders.threshold_2,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "三字符及以上阈值",
+                "长查询的门槛，默认容忍一处错拼或换位",
+                tuning.threshold_3,
+                &self.sliders.threshold_3,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "中段命中权重",
+                "命中词中（非词首、非连续）时的得分，调低会让前缀/缩写更占优",
+                tuning.match_mid,
+                &self.sliders.match_mid,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "换位罚分（每对）",
+                "相邻两个字母打反的代价；调小则错拼更容易命中",
+                tuning.pen_transpose,
+                &self.sliders.pen_transpose,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "bundle 名称权重",
+                "用原始 bundle 名命中时的折扣，低于显示名",
+                tuning.bundle_weight,
+                &self.sliders.bundle_weight,
+                &pal,
+            ))
+            .child(self.render_knob(
+                "习惯加成上限",
+                "使用次数与最近使用最多能加分多少；0 表示完全按文本相似度排序",
+                tuning.usage_boost_max,
+                &self.sliders.usage_boost_max,
+                &pal,
+            ));
+
+        tuning_section = tuning_section.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    Button::new("tuning-reset")
+                        .label("恢复默认")
+                        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+                            view.reset_tuning(window, cx);
+                        })),
+                )
+                .children(self.tuning_saved_at.clone().map(|msg| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(pal.accent_info)
+                        .child(msg)
+                })),
+        );
+        root = root.child(tuning_section);
 
         // ---- plugins section ----
         let mut section = div().flex().flex_col().gap_2().child(title(format!(
