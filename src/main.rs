@@ -82,6 +82,10 @@ struct LauncherWindowState {
     /// The app that was frontmost before the launcher took the keyboard, so it
     /// can have it back when the launcher closes.
     previous_app: RefCell<Option<i32>>,
+    /// The most recent frontmost application that was not Touchery, sampled by
+    /// the poll loop. With input-method support off the launcher hands the
+    /// keyboard to it instead of keeping the front.
+    last_other_app: RefCell<Option<i32>>,
 }
 
 impl Global for LauncherWindowState {}
@@ -184,6 +188,7 @@ fn main() {
             apps_updated: apps_updated.clone(),
             panel_blurred: panel_blurred.clone(),
             previous_app: RefCell::new(None),
+            last_other_app: RefCell::new(None),
         });
 
         // Dismiss the launcher as soon as the user looks away from it.
@@ -238,6 +243,18 @@ fn main() {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(50))
                     .await;
+
+                // Remember who had the keyboard, so the launcher can give it
+                // back when input-method support is off.
+                let _ = cx.update(|cx| {
+                    if let Some(pid) = frontmost_pid()
+                        && pid != std::process::id() as i32
+                    {
+                        *cx.global::<LauncherWindowState>()
+                            .last_other_app
+                            .borrow_mut() = Some(pid);
+                    }
+                });
 
                 if let Some(menu_id) = tray::poll_menu_event() {
                     let _ = cx.update(|cx| match menu_id.as_str() {
@@ -615,12 +632,6 @@ fn keyboard_owner_pid() -> Option<i32> {
 /// clicked another app (which is also how the launcher learns to dismiss
 /// itself), that app already has the keyboard and must keep it.
 fn hand_back_keyboard(cx: &App) {
-    use objc::class;
-    use objc::msg_send;
-    use objc::runtime::Object;
-    use objc::sel;
-    use objc::sel_impl;
-
     if !is_self_active() {
         return; // the user already gave the keyboard to somebody else
     }
@@ -640,6 +651,17 @@ fn hand_back_keyboard(cx: &App) {
     else {
         return;
     };
+
+    activate_app(pid);
+}
+
+/// Make another application the active one.
+fn activate_app(pid: i32) {
+    use objc::class;
+    use objc::msg_send;
+    use objc::runtime::Object;
+    use objc::sel;
+    use objc::sel_impl;
 
     unsafe {
         let app: *mut Object = msg_send![
