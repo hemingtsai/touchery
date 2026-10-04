@@ -198,7 +198,7 @@ end
 
 ### 示例
 
-参见 [`examples/hello.lua`](examples/hello.lua)：
+参见 [`examples/hello.lua`](examples/hello.lua)（插件 API 契约）与 [`examples/calc.lua`](examples/calc.lua)（计算器：输入 `> 1+2^3` 实时显示结果，回车把结果复制到剪贴板）：
 
 ```bash
 mkdir -p ~/Library/Application\ Support/touchery/plugins
