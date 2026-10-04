@@ -48,6 +48,11 @@ pub struct SettingsView {
     /// Last plugin-install message, written by the install task and read by the
     /// refresh timer.
     install_status: Arc<std::sync::Mutex<Option<InstallStatus>>>,
+    /// Answer of the open panel, written by its completion block (which must not
+    /// touch gpui) and read by the refresh timer.
+    pending_pick: crate::file_picker::PickSlot,
+    /// Whether the open panel is on screen, so the button cannot stack panels.
+    pick_open: bool,
     /// The message currently on screen, so the timer only redraws on change.
     install_status_shown: Option<InstallStatus>,
     _keystroke_subscription: Subscription,
@@ -157,7 +162,8 @@ impl SettingsView {
                     .update(cx, |view, cx| {
                         let rows_changed = view.refresh_plugin_rows(cx);
                         let status_changed = view.refresh_install_status();
-                        if rows_changed || status_changed {
+                        let picked = view.refresh_picked_file(cx);
+                        if rows_changed || status_changed || picked {
                             cx.notify();
                         }
                     })
@@ -217,6 +223,8 @@ impl SettingsView {
             plugin_rows: Vec::new(),
             install_status: Arc::new(std::sync::Mutex::new(None)),
             install_status_shown: None,
+            pending_pick: crate::file_picker::new_slot(),
+            pick_open: false,
             _keystroke_subscription: keystroke_subscription,
             _plugin_refresh_task: plugin_refresh_task,
             _tuning_subscriptions: tuning_subscriptions,
@@ -552,22 +560,50 @@ impl SettingsView {
         true
     }
 
-    /// Choose a `.lua` file and install it as a plugin.
-    ///
-    /// The picker runs its own modal loop, so this call blocks until the user
-    /// answers; the copy and the Lua load happen on a background thread and the
-    /// refresh timer reports the outcome.
+    /// Ask for a `.lua` file. The panel is presented asynchronously; the answer
+    /// arrives via `refresh_picked_file`, because the completion block runs in
+    /// AppKit's event delivery where touching gpui re-enters a running update.
     fn install_plugin_from_picker(&mut self, cx: &mut Context<Self>) {
+        if self.pick_open {
+            return; // a panel is already on screen
+        }
         let start_dir = crate::plugins::plugins_dir();
-        let Some(source) = crate::file_picker::pick_file(
+        crate::file_picker::pick_file(
             "选择要安装的插件脚本（.lua）",
             "安装",
             "lua",
             start_dir.as_deref(),
-        ) else {
-            return;
-        };
+            self.pending_pick.clone(),
+        );
+        self.pick_open = true;
+        cx.notify();
+    }
 
+    /// Start installing the file the user chose, if they have chosen one.
+    fn refresh_picked_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(outcome) = crate::file_picker::take_outcome(&self.pending_pick) else {
+            return false;
+        };
+        self.pick_open = false;
+        match outcome {
+            crate::file_picker::PickOutcome::Cancelled => {
+                self.set_install_status(InstallStatus {
+                    message: "已取消安装".to_string(),
+                    failed: false,
+                });
+            }
+            crate::file_picker::PickOutcome::Picked(source) => {
+                self.start_install(source, cx);
+            }
+        }
+        true
+    }
+
+    /// Copy the script into the plugins directory and load it.
+    ///
+    /// The copy and the Lua load happen on a background thread; the refresh
+    /// timer reports the outcome.
+    fn start_install(&mut self, source: std::path::PathBuf, cx: &mut Context<Self>) {
         let name = source
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
