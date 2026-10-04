@@ -400,18 +400,19 @@ impl LauncherView {
 
         match row {
             Row::App(app_idx) => {
-                let Some(path) = self
+                let Some((path, name)) = self
                     .list
                     .read(cx)
                     .delegate()
                     .apps
                     .get(app_idx)
-                    .map(|e| e.path.clone())
+                    .map(|entry| (entry.path.clone(), entry.name.clone()))
                 else {
                     return;
                 };
                 self.launch_error = None;
                 let window_handle = window.window_handle();
+                let usage = crate::usage_store(cx);
                 // Launch on the background executor: `open` waits for
                 // LaunchServices, and blocking the UI thread on it would stall
                 // the window. Waiting for the exit status also reaps the child
@@ -422,7 +423,14 @@ impl LauncherView {
                     let status = cx
                         .background_executor()
                         .spawn(async move {
-                            std::process::Command::new("open").arg(&open_path).status()
+                            let result =
+                                std::process::Command::new("open").arg(&open_path).status();
+                            // Habit ranking needs the launches that actually
+                            // started, recorded off the UI thread.
+                            if result.as_ref().is_ok_and(|status| status.success()) {
+                                usage.record(&open_path, &name, crate::usage::now_unix());
+                            }
+                            result
                         })
                         .await;
 

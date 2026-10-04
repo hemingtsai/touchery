@@ -13,6 +13,7 @@ mod search;
 mod themes;
 mod tray;
 mod ui_theme;
+mod usage;
 mod ui_settings;
 mod watcher;
 
@@ -66,6 +67,8 @@ struct LauncherWindowState {
     /// readers clone a pointer instead of every prepared search key.
     apps_index: Arc<RwLock<Arc<Vec<apps::AppEntry>>>>,
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
+    /// Launch history, shared by the launcher and the control panel.
+    usage: Arc<usage::UsageStore>,
     /// Flag to notify launcher that apps list was updated.
     apps_updated: Arc<AtomicBool>,
     /// Raised by `observe_panel_blur` when the launcher panel stops being the
@@ -140,6 +143,7 @@ fn main() {
         let plugin_manager = Arc::new(std::sync::Mutex::new(plugins::PluginManager {
             plugins: Vec::new(),
         }));
+        let usage = Arc::new(usage::UsageStore::load());
 
         // Menu bar tray icon (lightning bolt). Must stay alive for the whole
         // process lifetime.
@@ -167,6 +171,7 @@ fn main() {
             hotkey_error: RefCell::new(hotkey_error),
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
+            usage: usage.clone(),
             apps_updated: apps_updated.clone(),
             panel_blurred: panel_blurred.clone(),
         });
@@ -474,6 +479,10 @@ pub fn check_apps_updated(cx: &App) -> bool {
     cx.global::<LauncherWindowState>()
         .apps_updated
         .swap(false, Ordering::SeqCst)
+}
+
+pub fn usage_store(cx: &App) -> Arc<usage::UsageStore> {
+    cx.global::<LauncherWindowState>().usage.clone()
 }
 
 pub fn plugin_manager(cx: &App) -> Arc<std::sync::Mutex<plugins::PluginManager>> {
