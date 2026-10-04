@@ -79,6 +79,9 @@ struct LauncherWindowState {
     /// Raised by `observe_panel_blur` when the launcher panel stops being the
     /// key window. The poll loop turns it into a close.
     panel_blurred: Arc<AtomicBool>,
+    /// The app that was frontmost before the launcher took the keyboard, so it
+    /// can have it back when the launcher closes.
+    previous_app: RefCell<Option<i32>>,
 }
 
 impl Global for LauncherWindowState {}
@@ -180,6 +183,7 @@ fn main() {
             search_tuning: RefCell::new(search_tuning),
             apps_updated: apps_updated.clone(),
             panel_blurred: panel_blurred.clone(),
+            previous_app: RefCell::new(None),
         });
 
         // Dismiss the launcher as soon as the user looks away from it.
@@ -401,10 +405,19 @@ fn toggle_launcher(cx: &mut App) {
             .update(cx, |_, window, _| window.remove_window())
             .is_ok()
         {
+            hand_back_keyboard(cx);
             return;
         }
         // Stale handle — fall through and open a fresh window.
     }
+
+    // Input methods (Chinese, Japanese, emoji, …) only compose into the
+    // focused view when the application is active, and the launcher's
+    // non-activating panel never activates it by itself. Take the keyboard
+    // before showing the panel, remembering who had it, and hand it back on
+    // dismiss.
+    *cx.global::<LauncherWindowState>().previous_app.borrow_mut() = keyboard_owner_pid();
+    cx.activate(true);
 
     let (bounds, display_id) = compute_spotlight_bounds(cx);
     let handle = cx
@@ -458,6 +471,7 @@ pub fn close_launcher(cx: &mut App) {
     if let Some(handle) = existing {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
+    hand_back_keyboard(cx);
 }
 
 /// Dismiss the launcher from *inside* the launcher window's own update cycle
@@ -470,6 +484,7 @@ pub fn dismiss_launcher(window: &mut Window, cx: &mut App) {
         .borrow_mut()
         .take();
     window.remove_window();
+    hand_back_keyboard(cx);
 }
 
 /// Snapshot of the application index (loaded once at startup).
@@ -553,6 +568,84 @@ pub fn reregister_current(cx: &mut App) -> anyhow::Result<()> {
     let hk = hotkey::hotkey_from_config(&config::Config::load().hotkey)
         .unwrap_or_else(|_| hotkey::default_hotkey());
     apply_hotkey(cx, hk)
+}
+
+/// The process id of the frontmost application, if any.
+fn frontmost_pid() -> Option<i32> {
+    use objc::class;
+    use objc::msg_send;
+    use objc::runtime::Object;
+    use objc::sel;
+    use objc::sel_impl;
+
+    unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut Object = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        (pid > 0).then_some(pid)
+    }
+}
+
+/// Whether Touchery itself is the active application.
+fn is_self_active() -> bool {
+    frontmost_pid() == Some(std::process::id() as i32)
+}
+
+/// The process id of the app whose keyboard the launcher is about to take.
+/// Touchery itself never counts.
+fn keyboard_owner_pid() -> Option<i32> {
+    frontmost_pid().filter(|pid| *pid != std::process::id() as i32)
+}
+
+/// Give the keyboard back to the app the launcher took it from.
+///
+/// Only does anything while Touchery is still the active app: if the user
+/// clicked another app (which is also how the launcher learns to dismiss
+/// itself), that app already has the keyboard and must keep it.
+fn hand_back_keyboard(cx: &App) {
+    use objc::class;
+    use objc::msg_send;
+    use objc::runtime::Object;
+    use objc::sel;
+    use objc::sel_impl;
+
+    if !is_self_active() {
+        return; // the user already gave the keyboard to somebody else
+    }
+    if cx
+        .global::<LauncherWindowState>()
+        .settings_window
+        .borrow()
+        .is_some()
+    {
+        return; // the control panel is about to take the keyboard
+    }
+    let Some(pid) = cx
+        .global::<LauncherWindowState>()
+        .previous_app
+        .borrow_mut()
+        .take()
+    else {
+        return;
+    };
+
+    unsafe {
+        let app: *mut Object = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        if app.is_null() {
+            return;
+        }
+        // NSApplicationActivateIgnoringOtherApps
+        let _: bool = msg_send![app, activateWithOptions: 1usize << 1];
+    }
 }
 
 /// Set NSApplicationActivationPolicyAccessory so the app runs as a menu-bar
