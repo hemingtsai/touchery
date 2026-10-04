@@ -5,6 +5,7 @@ mod apps;
 mod autostart;
 mod config;
 mod display;
+mod file_picker;
 mod hotkey;
 mod launcher;
 mod lua_budget;

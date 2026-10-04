@@ -6,6 +6,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::switch::Switch;
+use std::sync::Arc;
 
 /// Keys that are pure modifier presses and cannot form a hotkey by themselves.
 const MODIFIER_KEYS: &[&str] = &[
@@ -22,6 +23,14 @@ const MODIFIER_KEYS: &[&str] = &[
     "caps_lock",
 ];
 
+/// Outcome of the last plugin install, shared with the background task that
+/// performs it (which must not touch the view directly).
+#[derive(Clone, PartialEq)]
+struct InstallStatus {
+    message: String,
+    failed: bool,
+}
+
 pub struct SettingsView {
     /// Which page the sidebar is showing.
     page: SettingsPage,
@@ -36,6 +45,11 @@ pub struct SettingsView {
     /// render) so painting never waits on the plugin lock, which a runaway
     /// plugin can hold for an unbounded time.
     plugin_rows: Vec<PluginRowView>,
+    /// Last plugin-install message, written by the install task and read by the
+    /// refresh timer.
+    install_status: Arc<std::sync::Mutex<Option<InstallStatus>>>,
+    /// The message currently on screen, so the timer only redraws on change.
+    install_status_shown: Option<InstallStatus>,
     _keystroke_subscription: Subscription,
     _plugin_refresh_task: Task<()>,
     _tuning_subscriptions: Vec<Subscription>,
@@ -141,7 +155,9 @@ impl SettingsView {
                     .await;
                 let alive = this
                     .update(cx, |view, cx| {
-                        if view.refresh_plugin_rows(cx) {
+                        let rows_changed = view.refresh_plugin_rows(cx);
+                        let status_changed = view.refresh_install_status();
+                        if rows_changed || status_changed {
                             cx.notify();
                         }
                     })
@@ -199,6 +215,8 @@ impl SettingsView {
             tuning_saved_at: None,
             sliders,
             plugin_rows: Vec::new(),
+            install_status: Arc::new(std::sync::Mutex::new(None)),
+            install_status_shown: None,
             _keystroke_subscription: keystroke_subscription,
             _plugin_refresh_task: plugin_refresh_task,
             _tuning_subscriptions: tuning_subscriptions,
@@ -518,6 +536,100 @@ impl SettingsView {
         }
         self.plugin_rows = rows;
         true
+    }
+
+    /// Pick up the message the install task left behind.
+    fn refresh_install_status(&mut self) -> bool {
+        let current = self
+            .install_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if current == self.install_status_shown {
+            return false;
+        }
+        self.install_status_shown = current;
+        true
+    }
+
+    /// Choose a `.lua` file and install it as a plugin.
+    ///
+    /// The picker runs its own modal loop, so this call blocks until the user
+    /// answers; the copy and the Lua load happen on a background thread and the
+    /// refresh timer reports the outcome.
+    fn install_plugin_from_picker(&mut self, cx: &mut Context<Self>) {
+        let start_dir = crate::plugins::plugins_dir();
+        let Some(source) = crate::file_picker::pick_file(
+            "选择要安装的插件脚本（.lua）",
+            "安装",
+            "lua",
+            start_dir.as_deref(),
+        ) else {
+            return;
+        };
+
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.display().to_string());
+        self.set_install_status(InstallStatus {
+            message: format!("正在安装 {name}…"),
+            failed: false,
+        });
+        cx.notify();
+
+        let pm = crate::plugin_manager(cx);
+        let status = self.install_status.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let outcome = match crate::plugins::install_script(&source) {
+                    Ok(file_name) => {
+                        // A plugin the user had switched off under the same name
+                        // must not keep the freshly installed copy off, and the
+                        // runtimes of the other plugins stay untouched.
+                        if let Err(e) = crate::config::modify(|config| {
+                            config.plugins.insert(file_name.clone(), true);
+                        }) {
+                            eprintln!("[plugin] failed to enable {file_name}: {e:#}");
+                        }
+                        let loaded_error = {
+                            let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
+                            match manager.load_installed(&file_name) {
+                                Err(e) => Some(format!("{e:#}")),
+                                Ok(()) => manager
+                                    .plugins
+                                    .iter()
+                                    .find(|plugin| plugin.file_name == file_name)
+                                    .and_then(|plugin| plugin.error.clone()),
+                            }
+                        };
+                        match loaded_error {
+                            Some(error) => InstallStatus {
+                                message: format!("已安装 {file_name}，但加载失败: {error}"),
+                                failed: true,
+                            },
+                            None => InstallStatus {
+                                message: format!("已安装 {file_name}"),
+                                failed: false,
+                            },
+                        }
+                    }
+                    Err(e) => InstallStatus {
+                        message: format!("安装失败: {e:#}"),
+                        failed: true,
+                    },
+                };
+                *status.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            })
+            .detach();
+    }
+
+    fn set_install_status(&mut self, status: InstallStatus) {
+        *self
+            .install_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
+        self.install_status_shown = Some(status);
     }
 
     fn render_plugin_row(
@@ -1247,6 +1359,33 @@ impl SettingsView {
                         .text_size(px(11.0))
                         .text_color(pal.text_secondary)
                         .child("目录: ~/Library/Application Support/touchery/plugins"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(Button::new("plugin-install").label("安装插件…").on_click(
+                            cx.listener(|view, _: &ClickEvent, _window, cx| {
+                                view.install_plugin_from_picker(cx);
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(pal.text_secondary)
+                                .child("选择 .lua 文件安装，安装后立即生效"),
+                        )
+                        .children(self.install_status_shown.as_ref().map(|status| {
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(if status.failed {
+                                    pal.accent_error
+                                } else {
+                                    pal.accent_ok
+                                })
+                                .child(status.message.clone())
+                        })),
                 )
                 .child(list)
                 .into_any_element(),

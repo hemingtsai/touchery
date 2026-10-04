@@ -51,7 +51,9 @@ impl Plugin {
         let run_fn = lua.globals().get::<Option<Function>>("run")?;
         let run_sub_fn = lua.globals().get::<Option<Function>>("run_sub")?;
         if get_items_fn.is_none() || run_fn.is_none() {
-            anyhow::bail!("plugin must define global functions `get_items(query)` and `run(value, query)`");
+            anyhow::bail!(
+                "plugin must define global functions `get_items(query)` and `run(value, query)`"
+            );
         }
         if run_sub_fn.is_none() {
             anyhow::bail!("plugin must define global function `run_sub(value, sub_query)`");
@@ -173,6 +175,61 @@ pub fn plugins_dir() -> Option<PathBuf> {
     crate::config::data_root().map(|root| root.join("plugins"))
 }
 
+/// Install a Lua script into the plugins directory.
+///
+/// The script is validated (UTF-8, non-empty, `.lua`), copied byte for byte and
+/// never overwrites an existing plugin: a name that is taken gets the next free
+/// `name-2.lua`, so an installed plugin — and any edits the user made to it —
+/// survive. Returns the file name it was installed as.
+pub fn install_script(source: &std::path::Path) -> anyhow::Result<String> {
+    let dir = plugins_dir().context("no data directory available")?;
+    install_into(&dir, source)
+}
+
+fn install_into(dir: &std::path::Path, source: &std::path::Path) -> anyhow::Result<String> {
+    let file_name = source
+        .file_name()
+        .context("no file name")?
+        .to_string_lossy()
+        .to_string();
+    if !file_name.to_ascii_lowercase().ends_with(".lua") {
+        anyhow::bail!("只能安装 .lua 文件（收到 {file_name}）");
+    }
+    // Read it first: a directory, a binary or a non-UTF-8 file must be refused
+    // before anything lands in the plugins directory.
+    let text = std::fs::read_to_string(source)
+        .with_context(|| format!("无法读取 {}", source.display()))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("{file_name} 是空文件");
+    }
+
+    std::fs::create_dir_all(dir).with_context(|| format!("无法创建 {}", dir.display()))?;
+    let file_name = free_file_name(dir, &file_name);
+    let target = dir.join(&file_name);
+    // Copy the bytes rather than the decoded text so line endings and encoding
+    // survive exactly.
+    std::fs::copy(source, &target).with_context(|| format!("无法写入 {}", target.display()))?;
+    Ok(file_name)
+}
+
+/// `calc.lua` -> `calc.lua`, then `calc-2.lua`, `calc-3.lua`, …
+fn free_file_name(dir: &std::path::Path, file_name: &str) -> String {
+    if !dir.join(file_name).exists() {
+        return file_name.to_string();
+    }
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, extension)) => (stem, format!(".{extension}")),
+        None => (file_name, String::new()),
+    };
+    for suffix in 2..1000 {
+        let candidate = format!("{stem}-{suffix}{extension}");
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem}-{}{extension}", std::process::id())
+}
+
 pub struct PluginManager {
     pub plugins: Vec<Plugin>,
 }
@@ -242,6 +299,22 @@ impl PluginManager {
         }
     }
 
+    /// Load a plugin file that was just installed, leaving the runtimes of the
+    /// others alone. A failure is recorded on the plugin's row (and returned),
+    /// exactly like a failure at startup.
+    pub fn load_installed(&mut self, file_name: &str) -> anyhow::Result<()> {
+        let dir = plugins_dir().context("no data directory available")?;
+        let enabled = *Config::load().plugins.get(file_name).unwrap_or(&true);
+        self.load_installed_from(&dir, file_name, enabled);
+        Ok(())
+    }
+
+    fn load_installed_from(&mut self, dir: &std::path::Path, file_name: &str, enabled: bool) {
+        self.plugins.retain(|plugin| plugin.file_name != file_name);
+        Self::load_file(&mut self.plugins, &dir.join(file_name), enabled);
+        self.plugins.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    }
+
     pub fn find_by_file_mut(&mut self, file_name: &str) -> Option<&mut Plugin> {
         self.plugins.iter_mut().find(|p| p.file_name == file_name)
     }
@@ -307,6 +380,131 @@ mod tests {
     }
 
     #[test]
+    fn installing_a_script_copies_it_into_the_plugins_directory() {
+        let dir = std::env::temp_dir().join("touchery-install-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("calc.lua");
+        std::fs::write(
+            &source,
+            "-- calculator\nfunction get_items(q) return {} end\n",
+        )
+        .unwrap();
+
+        let plugins_dir = dir.join("plugins");
+        let installed = install_into(&plugins_dir, &source).unwrap();
+        assert_eq!(installed, "calc.lua");
+        assert_eq!(
+            std::fs::read_to_string(plugins_dir.join("calc.lua")).unwrap(),
+            std::fs::read_to_string(&source).unwrap()
+        );
+
+        // A second install of the same name must not clobber the first one.
+        let installed = install_into(&plugins_dir, &source).unwrap();
+        assert_eq!(installed, "calc-2.lua");
+        let installed = install_into(&plugins_dir, &source).unwrap();
+        assert_eq!(installed, "calc-3.lua");
+        assert!(plugins_dir.join("calc.lua").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_installed_plugin_is_loaded_without_touching_the_others() {
+        let dir = std::env::temp_dir().join("touchery-install-load-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins_dir = dir.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+
+        let mut manager = PluginManager {
+            plugins: Vec::new(),
+        };
+
+        // One plugin that is already installed and running.
+        let existing = plugins_dir.join("existing.lua");
+        std::fs::write(
+            &existing,
+            "function get_items(q) return {} end\nfunction run(v, q) end\nfunction run_sub(v, s) end\n",
+        )
+        .unwrap();
+        manager.load_installed_from(&plugins_dir, "existing.lua", true);
+        assert!(manager.plugins[0].runtime_loaded());
+
+        // A broken script lands as a row with an error instead of vanishing.
+        let broken = plugins_dir.join("broken.lua");
+        std::fs::write(&broken, "this is not lua").unwrap();
+        manager.load_installed_from(&plugins_dir, "broken.lua", true);
+        assert_eq!(manager.plugins.len(), 2);
+        let row = manager
+            .plugins
+            .iter()
+            .find(|plugin| plugin.file_name == "broken.lua")
+            .expect("the failed plugin keeps its row");
+        assert!(row.error.is_some(), "the failure must be visible");
+        assert!(!row.runtime_loaded());
+        // The working plugin was not reloaded.
+        assert!(
+            manager
+                .plugins
+                .iter()
+                .find(|plugin| plugin.file_name == "existing.lua")
+                .unwrap()
+                .runtime_loaded()
+        );
+
+        // Reinstalling the same name replaces the row instead of duplicating it.
+        std::fs::write(
+            &broken,
+            "function get_items(q) return {} end\nfunction run(v, q) end\nfunction run_sub(v, s) end\n",
+        )
+        .unwrap();
+        manager.load_installed_from(&plugins_dir, "broken.lua", true);
+        assert_eq!(manager.plugins.len(), 2);
+        assert!(
+            manager
+                .plugins
+                .iter()
+                .find(|plugin| plugin.file_name == "broken.lua")
+                .unwrap()
+                .error
+                .is_none()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installing_refuses_what_is_not_a_lua_script() {
+        let dir = std::env::temp_dir().join("touchery-install-refuse-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plugins_dir = dir.join("plugins");
+
+        let not_lua = dir.join("script.txt");
+        std::fs::write(&not_lua, "function get_items(q) return {} end").unwrap();
+        assert!(install_into(&plugins_dir, &not_lua).is_err());
+        assert!(!plugins_dir.exists(), "nothing may be written on refusal");
+
+        let empty = dir.join("empty.lua");
+        std::fs::write(&empty, "   \n").unwrap();
+        assert!(install_into(&plugins_dir, &empty).is_err());
+
+        let binary = dir.join("binary.lua");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(install_into(&plugins_dir, &binary).is_err());
+
+        let missing = dir.join("missing.lua");
+        assert!(install_into(&plugins_dir, &missing).is_err());
+
+        // A directory that merely ends in .lua is not a script either.
+        let fake = dir.join("folder.lua");
+        std::fs::create_dir_all(&fake).unwrap();
+        assert!(install_into(&plugins_dir, &fake).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn disabled_plugins_are_not_executed_at_startup() {
         let dir = std::env::temp_dir().join("touchery-plugin-disabled-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -342,7 +540,13 @@ mod tests {
         PluginManager::load_file(&mut plugins, &plugin_path, true);
 
         assert_eq!(plugins.len(), 1);
-        assert!(plugins[0].error.as_deref().unwrap_or("").contains("TOP_LEVEL_BOOM"));
+        assert!(
+            plugins[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("TOP_LEVEL_BOOM")
+        );
         assert!(!plugins[0].runtime_loaded());
 
         let _ = std::fs::remove_dir_all(&dir);
