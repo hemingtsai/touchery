@@ -216,6 +216,24 @@ mod tests {
         assert!(loaded.unusable.is_none());
         assert!(loaded.config.apps_only);
 
+        // A config written before the tuning existed keeps the defaults.
+        assert_eq!(loaded.config.search, crate::search::SearchTuning::default());
+
+        // A hand-edited tuning block is loaded as written.
+        let tuned = dir.join("tuned.json");
+        std::fs::write(
+            &tuned,
+            r#"{"search":{"threshold_3":1000,"usage_boost_max":0}}"#,
+        )
+        .unwrap();
+        let loaded = Config::read_from(&tuned);
+        assert_eq!(loaded.config.search.threshold_3, 1000);
+        assert_eq!(loaded.config.search.usage_boost_max, 0);
+        assert_eq!(
+            loaded.config.search.match_mid, 800,
+            "the rest keeps its default"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
