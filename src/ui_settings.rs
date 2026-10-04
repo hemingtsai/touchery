@@ -45,6 +45,12 @@ pub struct SettingsView {
     /// render) so painting never waits on the plugin lock, which a runaway
     /// plugin can hold for an unbounded time.
     plugin_rows: Vec<PluginRowView>,
+    /// Plugins parked in `legacy/`, refreshed with the rows above.
+    legacy_rows: Vec<LegacyRowView>,
+    /// Plugin whose delete button has been clicked once and is waiting for a
+    /// second click: deleting is destructive, and a modal confirmation would be
+    /// an AppKit modal loop inside a gpui update, which aborts the app.
+    pending_delete: Option<String>,
     /// Last plugin-install message, written by the install task and read by the
     /// refresh timer.
     install_status: Arc<std::sync::Mutex<Option<InstallStatus>>>,
@@ -132,6 +138,7 @@ fn humanize_age(seconds: i64) -> String {
 /// Snapshot row of a plugin for rendering.
 #[derive(Clone, PartialEq)]
 struct PluginRowView {
+    /// Path relative to the plugins directory; also the configuration key.
     file_name: String,
     /// What the plugin calls itself (else the file stem).
     name: String,
@@ -140,10 +147,22 @@ struct PluginRowView {
     license: Option<String>,
     repository: Option<String>,
     description: Option<String>,
+    /// `1.3.0 – 2.0.0` when the plugin declares a supported range.
+    range: Option<String>,
     enabled: bool,
     /// Whether a Lua runtime is loaded for this plugin right now.
     loaded: bool,
     error: Option<String>,
+}
+
+/// A plugin parked in `legacy/` because this build is outside its range.
+#[derive(Clone, PartialEq)]
+struct LegacyRowView {
+    file_name: String,
+    name: String,
+    version: Option<String>,
+    range: Option<String>,
+    reason: String,
 }
 
 impl SettingsView {
@@ -227,6 +246,8 @@ impl SettingsView {
             tuning_saved_at: None,
             sliders,
             plugin_rows: Vec::new(),
+            legacy_rows: Vec::new(),
+            pending_delete: None,
             install_status: Arc::new(std::sync::Mutex::new(None)),
             install_status_shown: None,
             pending_pick: crate::file_picker::new_slot(),
@@ -545,16 +566,77 @@ impl SettingsView {
                 license: p.info.license.clone(),
                 repository: p.info.repository.clone(),
                 description: p.info.description.clone(),
+                range: crate::plugins::range_text(&p.info),
                 enabled: p.enabled,
                 loaded: p.runtime_loaded(),
                 error: p.error.clone(),
             })
             .collect();
-        if rows == self.plugin_rows {
+        let legacy: Vec<LegacyRowView> = manager
+            .legacy
+            .iter()
+            .map(|p| LegacyRowView {
+                file_name: p.file_name.clone(),
+                name: p.info.name.clone(),
+                version: p.info.version.clone(),
+                range: crate::plugins::range_text(&p.info),
+                reason: p.reason.clone(),
+            })
+            .collect();
+        if rows == self.plugin_rows && legacy == self.legacy_rows {
             return false;
         }
         self.plugin_rows = rows;
+        self.legacy_rows = legacy;
+        // A row that disappeared (deleted, or moved by the installer) must not
+        // keep a half-armed delete around.
+        if let Some(pending) = &self.pending_delete
+            && !self.plugin_rows.iter().any(|row| &row.file_name == pending)
+            && !self.legacy_rows.iter().any(|row| &row.file_name == pending)
+        {
+            self.pending_delete = None;
+        }
         true
+    }
+
+    /// First click arms the delete, the second one performs it.
+    fn request_delete(&mut self, file_name: &str, cx: &mut Context<Self>) {
+        if self.pending_delete.as_deref() != Some(file_name) {
+            self.pending_delete = Some(file_name.to_string());
+            cx.notify();
+            return;
+        }
+        self.pending_delete = None;
+        let pm = crate::plugin_manager(cx);
+        let file_name = file_name.to_string();
+        let task_name = file_name.clone();
+        let status = self.install_status.clone();
+        // Removing the file touches the disk and the configuration, so it runs
+        // off the UI thread and the refresh timer reports the outcome.
+        cx.background_executor()
+            .spawn(async move {
+                let outcome = match pm
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .delete(&task_name)
+                {
+                    Ok(()) => InstallStatus {
+                        message: format!("已删除 {task_name}"),
+                        failed: false,
+                    },
+                    Err(e) => InstallStatus {
+                        message: format!("删除失败: {e:#}"),
+                        failed: true,
+                    },
+                };
+                *status.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            })
+            .detach();
+        self.set_install_status(InstallStatus {
+            message: format!("正在删除 {file_name}…"),
+            failed: false,
+        });
+        cx.notify();
     }
 
     /// Pick up the message the install task left behind.
@@ -722,15 +804,21 @@ impl SettingsView {
             pal.text_secondary
         };
 
-        // "文件名 · 作者 · 许可证"; the file name is what the toggle and the
-        // installer work with, so it stays visible even when the plugin
-        // renames itself.
-        let mut details = vec![plugin.file_name.clone()];
+        // The location is what the installer, the toggle and the delete button
+        // work with, so it gets its own line; the rest of the metadata follows.
+        let location = plugin.file_name.clone();
+        let mut details: Vec<String> = Vec::new();
         if let Some(author) = &plugin.author {
-            details.push(author.clone());
+            details.push(format!("作者 {author}"));
         }
         if let Some(license) = &plugin.license {
             details.push(license.clone());
+        }
+        if let Some(range) = &plugin.range {
+            details.push(format!("需要 Touchery {range}"));
+        }
+        if let Some(description) = &plugin.description {
+            details.push(description.clone());
         }
         let details = details.join(" · ");
 
@@ -773,15 +861,15 @@ impl SettingsView {
                             .whitespace_nowrap()
                             .truncate()
                             .text_color(pal.text_secondary)
-                            .child(details),
+                            .child(location.clone()),
                     )
-                    .children(plugin.description.clone().map(|description| {
+                    .children((!details.is_empty()).then(|| {
                         div()
                             .text_size(px(11.0))
                             .whitespace_nowrap()
                             .truncate()
                             .text_color(pal.text_secondary)
-                            .child(description)
+                            .child(details.clone())
                     })),
             );
 
@@ -809,6 +897,45 @@ impl SettingsView {
                     .child("仓库"),
             );
         }
+
+        // Reveal the file in Finder: the location above is relative to the
+        // plugins directory, and this is how the user gets to it.
+        let reveal_name = file_name.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("plugin-reveal-{file_name}")))
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .text_color(pal.accent_info)
+                .cursor_pointer()
+                .hover(|style| style.underline())
+                .on_click(move |_, _, cx: &mut App| {
+                    let name = reveal_name.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Some(dir) = crate::plugins::plugins_dir() {
+                                let _ = std::process::Command::new("open")
+                                    .arg("-R")
+                                    .arg(dir.join(name))
+                                    .status();
+                            }
+                        })
+                        .detach();
+                })
+                .child("显示"),
+        );
+
+        // Destructive, so the first click only arms it.
+        let armed = self.pending_delete.as_deref() == Some(file_name.as_str());
+        let delete_name = file_name.clone();
+        row = row.child(
+            Button::new(SharedString::from(format!("plugin-delete-{file_name}")))
+                .label(if armed { "确认删除" } else { "删除" })
+                .when(armed, |button| button.danger())
+                .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                    view.request_delete(&delete_name, cx);
+                })),
+        );
 
         // The status and the switch close the row; the chain itself is the
         // function's value.
@@ -1462,9 +1589,107 @@ impl SettingsView {
         ]
     }
 
+    /// One parked plugin: what it is, where it sits and why it is not loaded.
+    fn render_legacy_row(
+        &self,
+        plugin: &LegacyRowView,
+        pal: &crate::themes::Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let file_name = plugin.file_name.clone();
+        let title = match &plugin.version {
+            Some(version) => format!("{} {version}", plugin.name),
+            None => plugin.name.clone(),
+        };
+        let details = match &plugin.range {
+            Some(range) => format!("需要 Touchery {range} · {}", plugin.reason),
+            None => plugin.reason.clone(),
+        };
+
+        let reveal_name = file_name.clone();
+        let armed = self.pending_delete.as_deref() == Some(file_name.as_str());
+        let delete_name = file_name.clone();
+
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .py_2()
+            .px_3()
+            .rounded_md()
+            .bg(pal.row_bg)
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap_y_0p5()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_primary)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.text_secondary)
+                            .child(file_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .whitespace_nowrap()
+                            .truncate()
+                            .text_color(pal.accent_error)
+                            .child(details),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("legacy-reveal-{file_name}")))
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .text_color(pal.accent_info)
+                    .cursor_pointer()
+                    .hover(|style| style.underline())
+                    .on_click(move |_, _, cx: &mut App| {
+                        let name = reveal_name.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                if let Some(dir) = crate::plugins::plugins_dir() {
+                                    let _ = std::process::Command::new("open")
+                                        .arg("-R")
+                                        .arg(dir.join(name))
+                                        .status();
+                                }
+                            })
+                            .detach();
+                    })
+                    .child("显示"),
+            )
+            .child(
+                Button::new(SharedString::from(format!("legacy-delete-{file_name}")))
+                    .label(if armed { "确认删除" } else { "删除" })
+                    .when(armed, |button| button.danger())
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                        view.request_delete(&delete_name, cx);
+                    })),
+            )
+    }
+
     /// 插件: what is loaded and what each plugin is doing.
     fn page_plugins(&self, pal: &themes::Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let plugins = self.plugin_rows.clone();
+        let legacy = self.legacy_rows.clone();
         let mut list = div().flex_shrink_0().flex().flex_col().gap_2();
         if plugins.is_empty() {
             list = list.child(
@@ -1480,7 +1705,7 @@ impl SettingsView {
             }
         }
 
-        vec![
+        let mut rows: Vec<AnyElement> = vec![
             div()
                 .flex_shrink_0()
                 .flex()
@@ -1522,7 +1747,34 @@ impl SettingsView {
                 )
                 .child(list)
                 .into_any_element(),
-        ]
+        ];
+
+        if !legacy.is_empty() {
+            let mut section = div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_title(
+                    format!("不兼容 ({}) — 已移入 legacy/，建议删除", legacy.len()),
+                    pal,
+                ))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(pal.text_secondary)
+                        .child(format!(
+                            "它们声明的 Touchery 版本区间不包含当前版本 {}，因此不会被加载；区间重新匹配时会自动移回原位置",
+                            crate::plugins::APP_VERSION
+                        )),
+                );
+            for plugin in &legacy {
+                section = section.child(self.render_legacy_row(plugin, pal, cx));
+            }
+            rows.push(section.into_any_element());
+        }
+
+        rows
     }
 }
 
