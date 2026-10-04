@@ -1,5 +1,5 @@
 -- touchery 计算器插件（示例）
--- 安装：复制到 ~/Library/Application Support/touchery/plugins/calc.lua，重启应用
+-- 安装：控制面板 →「插件」→「安装插件…」，或手动放进 plugins/<作者>/ 目录
 -- 使用：唤起启动器后输入 "> 1+2^3*4"，结果实时显示，回车把结果复制到剪贴板
 --
 -- 支持：+ - * / % ^ ( ) 一元正负号、小数与科学计数、常量 pi / e、
@@ -11,6 +11,19 @@
 --   get_items(query)          -> { { title, value, sub }, ... }
 --   run(value, query)         -> 一级回车（sub=false 的条目）
 --   run_sub(value, sub_query) -> 二级输入回车后调用（本插件不使用，但契约要求定义）
+--
+-- PLUGIN 必须是字面量表（值都是字符串）：读取元数据时不会执行脚本，否则
+-- 版本不兼容的插件在"发现不兼容"之前就已经跑过一遍了。
+
+PLUGIN = {
+    name = "计算器",
+    version = "1.0.0",
+    author = "hemingtsai",
+    license = "Apache-2.0",
+    repository = "https://github.com/hemingtsai/touchery",
+    min_touchery = "1.3.0",
+    description = "四则运算 + 次方，回车复制结果",
+}
 
 -- 复制命令；测试或非 macOS 环境可用 TOUCHERY_CALC_COPY 覆盖（如 xclip / wl-copy）。
 local COPY_CMD = os.getenv("TOUCHERY_CALC_COPY") or "pbcopy"

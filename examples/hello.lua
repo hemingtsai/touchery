@@ -3,7 +3,10 @@
 -- 使用：唤起启动器后输入 "> 关键词" 路由到本插件
 --
 -- 契约：
---   PLUGIN                     可选：插件自述（名称/版本/作者/许可证/仓库/说明）
+--   PLUGIN                     可选：插件自述（名称/版本/作者/许可证/仓库/说明，
+--                              以及支持的 Touchery 区间 min_touchery/max_touchery）。
+--                              必须是字面量表、值必须是字符串：读取元数据时不会执行
+--                              脚本，否则不兼容的插件在发现之前就已经跑过了
 --   get_items(query)          -> { { title, value, sub }, ... }  sub=true 表示需要二级输入
 --   run(value, query)         -> 一级回车（sub=false 的条目）
 --   run_sub(value, sub_query) -> 二级输入回车后调用
@@ -14,6 +17,7 @@ PLUGIN = {
     author = "hemingtsai",
     license = "Apache-2.0",
     repository = "https://github.com/hemingtsai/touchery",
+    min_touchery = "1.3.0",
     description = "演示插件契约：问候、回声与二级输入",
 }
 
