@@ -12,9 +12,9 @@ mod plugins;
 mod search;
 mod themes;
 mod tray;
+mod ui_settings;
 mod ui_theme;
 mod usage;
-mod ui_settings;
 mod watcher;
 
 use gpui::prelude::*;
@@ -22,15 +22,18 @@ use gpui::*;
 use gpui_component::Root;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Embedded assets (icons etc.).
 struct Assets;
 
-static ASSET_FILES: &[(&str, &[u8])] = &[("icons/search.svg", include_bytes!("../assets/icons/search.svg"))];
+static ASSET_FILES: &[(&str, &[u8])] = &[(
+    "icons/search.svg",
+    include_bytes!("../assets/icons/search.svg"),
+)];
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
@@ -69,6 +72,8 @@ struct LauncherWindowState {
     plugin_manager: Arc<std::sync::Mutex<plugins::PluginManager>>,
     /// Launch history, shared by the launcher and the control panel.
     usage: Arc<usage::UsageStore>,
+    /// Scoring knobs, updated live by the control panel.
+    search_tuning: RefCell<search::SearchTuning>,
     /// Flag to notify launcher that apps list was updated.
     apps_updated: Arc<AtomicBool>,
     /// Raised by `observe_panel_blur` when the launcher panel stops being the
@@ -110,32 +115,31 @@ fn main() {
         set_accessory_policy();
 
         let config = config::Config::load();
-        let initial_hotkey = hotkey::hotkey_from_config(&config.hotkey)
-            .unwrap_or_else(|_| hotkey::default_hotkey());
+        let initial_hotkey =
+            hotkey::hotkey_from_config(&config.hotkey).unwrap_or_else(|_| hotkey::default_hotkey());
 
         // A hotkey that cannot be registered must not abort startup: without a
         // window there would be no way for the user to pick another combo.
         // Keep the tray (the only way in) and report the failure in the panel.
-        let (hotkey_manager, initial_hotkey_id, hotkey_error) =
-            match hotkey::create_manager() {
-                Ok(manager) => match manager.register(initial_hotkey) {
-                    Ok(()) => (Some(manager), Some(initial_hotkey.id()), None),
-                    Err(e) => {
-                        eprintln!("Failed to register global hotkey: {e}");
-                        (
-                            Some(manager),
-                            None,
-                            Some(format!(
-                                "快捷键注册失败: {e} — 可能被其他应用占用，请在下方重新录制"
-                            )),
-                        )
-                    }
-                },
+        let (hotkey_manager, initial_hotkey_id, hotkey_error) = match hotkey::create_manager() {
+            Ok(manager) => match manager.register(initial_hotkey) {
+                Ok(()) => (Some(manager), Some(initial_hotkey.id()), None),
                 Err(e) => {
-                    eprintln!("Failed to create the global hotkey manager: {e}");
-                    (None, None, Some(format!("无法初始化全局快捷键: {e}")))
+                    eprintln!("Failed to register global hotkey: {e}");
+                    (
+                        Some(manager),
+                        None,
+                        Some(format!(
+                            "快捷键注册失败: {e} — 可能被其他应用占用，请在下方重新录制"
+                        )),
+                    )
                 }
-            };
+            },
+            Err(e) => {
+                eprintln!("Failed to create the global hotkey manager: {e}");
+                (None, None, Some(format!("无法初始化全局快捷键: {e}")))
+            }
+        };
         let hotkey_id = Arc::new(RwLock::new(initial_hotkey_id));
 
         let apps_index: Arc<RwLock<Arc<Vec<apps::AppEntry>>>> =
@@ -144,6 +148,7 @@ fn main() {
             plugins: Vec::new(),
         }));
         let usage = Arc::new(usage::UsageStore::load());
+        let search_tuning = config.search.clamped();
 
         // Menu bar tray icon (lightning bolt). Must stay alive for the whole
         // process lifetime.
@@ -172,6 +177,7 @@ fn main() {
             apps_index: apps_index.clone(),
             plugin_manager: plugin_manager.clone(),
             usage: usage.clone(),
+            search_tuning: RefCell::new(search_tuning),
             apps_updated: apps_updated.clone(),
             panel_blurred: panel_blurred.clone(),
         });
@@ -223,76 +229,78 @@ fn main() {
         let mut last_event_time: Option<Instant> = None;
         let mut needs_reindex = false;
         const DEBOUNCE_MS: u64 = 500; // 500ms debounce
-        cx.spawn(async move |cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(50))
-                .await;
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
 
-            if let Some(menu_id) = tray::poll_menu_event() {
-                let _ = cx.update(|cx| match menu_id.as_str() {
-                    tray::MENU_QUIT => cx.quit(),
-                    tray::MENU_OPEN_PANEL => open_settings(cx),
-                    _ => {}
-                });
-            }
+                if let Some(menu_id) = tray::poll_menu_event() {
+                    let _ = cx.update(|cx| match menu_id.as_str() {
+                        tray::MENU_QUIT => cx.quit(),
+                        tray::MENU_OPEN_PANEL => open_settings(cx),
+                        _ => {}
+                    });
+                }
 
-            // Handle app file system events: drain all events, mark reindex needed.
-            if let Ok(watcher_guard) = watcher_clone.try_borrow() {
-                if let Some(ref watcher) = *watcher_guard {
-                    while let Some(_event) = watcher.try_recv() {
-                        needs_reindex = true;
-                        last_event_time = Some(Instant::now());
+                // Handle app file system events: drain all events, mark reindex needed.
+                if let Ok(watcher_guard) = watcher_clone.try_borrow() {
+                    if let Some(ref watcher) = *watcher_guard {
+                        while let Some(_event) = watcher.try_recv() {
+                            needs_reindex = true;
+                            last_event_time = Some(Instant::now());
+                        }
                     }
                 }
-            }
 
-            // When debounce window expires and events were received, do full re-index.
-            if needs_reindex && !reindex_busy_clone.load(Ordering::SeqCst) {
-                if let Some(last) = last_event_time {
-                    if last.elapsed().as_millis() > DEBOUNCE_MS as u128 {
-                        needs_reindex = false;
-                        reindex_busy_clone.store(true, Ordering::SeqCst);
-                        // `enumerate_apps` waits on mdfind and AppKit, which
-                        // takes as long as the user's index is slow. This loop
-                        // runs on the foreground thread that also serves the
-                        // hotkey, the tray and every window, so the scan goes
-                        // to the background and only the result comes back.
-                        let index_ref = apps_index_clone.clone();
-                        let updated = apps_updated_clone.clone();
-                        let busy = reindex_busy_clone.clone();
-                        cx.background_executor()
-                            .spawn(async move {
-                                let new_entries = apps::enumerate_apps();
-                                *index_ref.write().unwrap_or_else(|e| e.into_inner()) =
-                                    Arc::new(new_entries);
-                                updated.store(true, Ordering::SeqCst);
-                                busy.store(false, Ordering::SeqCst);
-                            })
-                            .detach();
+                // When debounce window expires and events were received, do full re-index.
+                if needs_reindex && !reindex_busy_clone.load(Ordering::SeqCst) {
+                    if let Some(last) = last_event_time {
+                        if last.elapsed().as_millis() > DEBOUNCE_MS as u128 {
+                            needs_reindex = false;
+                            reindex_busy_clone.store(true, Ordering::SeqCst);
+                            // `enumerate_apps` waits on mdfind and AppKit, which
+                            // takes as long as the user's index is slow. This loop
+                            // runs on the foreground thread that also serves the
+                            // hotkey, the tray and every window, so the scan goes
+                            // to the background and only the result comes back.
+                            let index_ref = apps_index_clone.clone();
+                            let updated = apps_updated_clone.clone();
+                            let busy = reindex_busy_clone.clone();
+                            cx.background_executor()
+                                .spawn(async move {
+                                    let new_entries = apps::enumerate_apps();
+                                    *index_ref.write().unwrap_or_else(|e| e.into_inner()) =
+                                        Arc::new(new_entries);
+                                    updated.store(true, Ordering::SeqCst);
+                                    busy.store(false, Ordering::SeqCst);
+                                })
+                                .detach();
+                        }
                     }
                 }
-            }
 
-            // The user looked away from the launcher (clicked another app,
-            // Cmd-Tabbed, raised the control panel): dismiss it. The observer
-            // only raises the flag; closing here keeps gpui out of AppKit's
-            // notification callback.
-            if blur_flag.swap(false, Ordering::SeqCst) {
-                let _ = cx.update(close_launcher);
-            }
+                // The user looked away from the launcher (clicked another app,
+                // Cmd-Tabbed, raised the control panel): dismiss it. The observer
+                // only raises the flag; closing here keeps gpui out of AppKit's
+                // notification callback.
+                if blur_flag.swap(false, Ordering::SeqCst) {
+                    let _ = cx.update(close_launcher);
+                }
 
-            while let Ok(event) = receiver.try_recv() {
-                if event.state != global_hotkey::HotKeyState::Pressed {
-                    continue;
+                while let Ok(event) = receiver.try_recv() {
+                    if event.state != global_hotkey::HotKeyState::Pressed {
+                        continue;
+                    }
+                    let current_id = *hotkey_id.read().unwrap_or_else(|e| e.into_inner());
+                    let Some(current_id) = current_id else {
+                        continue; // no combo is registered
+                    };
+                    if event.id != current_id {
+                        continue;
+                    }
+                    let _ = cx.update(|cx| toggle_launcher(cx));
                 }
-                let current_id = *hotkey_id.read().unwrap_or_else(|e| e.into_inner());
-                let Some(current_id) = current_id else {
-                    continue; // no combo is registered
-                };
-                if event.id != current_id {
-                    continue;
-                }
-                let _ = cx.update(|cx| toggle_launcher(cx));
             }
         })
         .detach();
@@ -330,10 +338,7 @@ pub fn open_settings(cx: &mut App) {
             display::centered_bounds(display.as_ref(), settings_size, None),
             Some(display.id()),
         ),
-        None => (
-            Bounds::new(point(px(0.), px(0.)), settings_size),
-            None,
-        ),
+        None => (Bounds::new(point(px(0.), px(0.)), settings_size), None),
     };
 
     let handle = cx
@@ -481,14 +486,24 @@ pub fn check_apps_updated(cx: &App) -> bool {
         .swap(false, Ordering::SeqCst)
 }
 
+/// The scoring knobs the launcher sorts with.
+pub fn search_tuning(cx: &App) -> search::SearchTuning {
+    *cx.global::<LauncherWindowState>().search_tuning.borrow()
+}
+
+/// Replace the scoring knobs (the control panel calls this as sliders move).
+pub fn set_search_tuning(cx: &App, tuning: search::SearchTuning) {
+    *cx.global::<LauncherWindowState>()
+        .search_tuning
+        .borrow_mut() = tuning.clamped();
+}
+
 pub fn usage_store(cx: &App) -> Arc<usage::UsageStore> {
     cx.global::<LauncherWindowState>().usage.clone()
 }
 
 pub fn plugin_manager(cx: &App) -> Arc<std::sync::Mutex<plugins::PluginManager>> {
-    cx.global::<LauncherWindowState>()
-        .plugin_manager
-        .clone()
+    cx.global::<LauncherWindowState>().plugin_manager.clone()
 }
 
 /// Re-register the global hotkey. Reuses the single manager for the whole
@@ -589,20 +604,18 @@ fn observe_panel_blur(flag: Arc<AtomicBool>) {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
 
-    let block = ConcreteBlock::new(move |notification: *mut Object| {
-        unsafe {
-            if notification.is_null() {
-                return;
-            }
-            let window: *mut Object = msg_send![notification, object];
-            if window.is_null() {
-                return;
-            }
-            if !msg_send![window, isKindOfClass: &*class!(NSPanel)] {
-                return;
-            }
-            flag.store(true, Ordering::SeqCst);
+    let block = ConcreteBlock::new(move |notification: *mut Object| unsafe {
+        if notification.is_null() {
+            return;
         }
+        let window: *mut Object = msg_send![notification, object];
+        if window.is_null() {
+            return;
+        }
+        if !msg_send![window, isKindOfClass: &*class!(NSPanel)] {
+            return;
+        }
+        flag.store(true, Ordering::SeqCst);
     });
     let block = block.copy();
 
@@ -649,7 +662,7 @@ fn observe_panel_blur(flag: Arc<AtomicBool>) {
 fn disable_launcher_shadow() {
     use objc::class;
     use objc::msg_send;
-    use objc::runtime::{Object, NO};
+    use objc::runtime::{NO, Object};
     use objc::sel;
     use objc::sel_impl;
 

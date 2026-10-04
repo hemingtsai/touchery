@@ -1,12 +1,12 @@
 use crate::apps::AppEntry;
 use crate::plugins::PluginItem;
-use crate::search::search_apps;
+use crate::search::{SearchContext, SearchTuning, search_apps};
+use crate::{themes, ui_theme::*};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_component::{IndexPath, Sizable as _};
-use crate::{themes, ui_theme::*};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,14 +18,21 @@ pub const PLUGIN_PREFIX: &str = ">";
 #[derive(Clone)]
 pub enum Row {
     App(usize),
-    Plugin { plugin_name: String, item: PluginItem },
+    Plugin {
+        plugin_name: String,
+        item: PluginItem,
+    },
 }
 
 #[derive(Clone, PartialEq)]
 pub enum Mode {
     Normal,
     /// Secondary input for a `sub = true` plugin item.
-    SubInput { plugin_name: String, value: String, title: String },
+    SubInput {
+        plugin_name: String,
+        value: String,
+        title: String,
+    },
 }
 
 pub struct LauncherView {
@@ -60,6 +67,10 @@ pub struct LauncherDelegate {
     /// "Search applications only": the index is shared between windows, so the
     /// filter is applied while searching instead of by copying it.
     apps_only: bool,
+    /// Launch history the ranking boosts with.
+    usage: Arc<crate::usage::UsageStore>,
+    /// Scoring knobs, re-read from the global state when the index refreshes.
+    tuning: SearchTuning,
 }
 
 impl LauncherDelegate {
@@ -86,7 +97,13 @@ impl LauncherDelegate {
         } else {
             self.plugin_rows.clear();
             self.search_generation += 1;
-            self.app_rows = search_apps(query, &self.apps, self.apps_only)
+            let context = SearchContext {
+                apps_only: self.apps_only,
+                usage: &self.usage,
+                tuning: &self.tuning,
+                now: crate::usage::now_unix(),
+            };
+            self.app_rows = search_apps(query, &self.apps, &context)
                 .into_iter()
                 .map(|(i, _)| Row::App(i))
                 .collect();
@@ -113,15 +130,22 @@ impl ListDelegate for LauncherDelegate {
             Row::Plugin { plugin_name, item } => format!("{}:{}", plugin_name, item.title),
         };
         let pal = themes::palette(cx);
-        Some(ListItem::new(ix).child(
-            div()
-                .flex()
-                .items_center()
-                .px_4()
-                .py_2()
-                .rounded_md()
-                .child(div().text_size(px(14.0)).text_color(pal.text_primary).child(text)),
-        ))
+        Some(
+            ListItem::new(ix).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(pal.text_primary)
+                            .child(text),
+                    ),
+            ),
+        )
     }
 
     fn set_selected_index(
@@ -160,10 +184,21 @@ impl LauncherView {
         // ...), excluding helpers buried in system directories.
         let all_apps = crate::app_index(cx);
         let apps_only = crate::config::Config::load().apps_only;
-        let initial_rows: Vec<Row> = search_apps("", &all_apps, apps_only)
-            .into_iter()
-            .map(|(i, _)| Row::App(i))
-            .collect();
+        let usage = crate::usage_store(cx);
+        let tuning = crate::search_tuning(cx);
+        let initial_rows: Vec<Row> = search_apps(
+            "",
+            &all_apps,
+            &SearchContext {
+                apps_only,
+                usage: &usage,
+                tuning: &tuning,
+                now: crate::usage::now_unix(),
+            },
+        )
+        .into_iter()
+        .map(|(i, _)| Row::App(i))
+        .collect();
 
         let delegate = LauncherDelegate {
             apps: all_apps,
@@ -172,6 +207,8 @@ impl LauncherView {
             last_query: String::new(),
             search_generation: 0,
             apps_only,
+            usage,
+            tuning,
         };
 
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
@@ -179,8 +216,8 @@ impl LauncherView {
         let query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 > 调用插件…"));
 
-        let sub_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回"));
+        let sub_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回"));
 
         // Typing drives the filtering.
         let query_subscription = cx.subscribe_in(
@@ -210,47 +247,48 @@ impl LauncherView {
             },
         );
 
-        let sub_input_subscription = cx.subscribe_in(
-            &sub_input,
-            window,
-            |launcher, input, event, window, cx| {
+        let sub_input_subscription =
+            cx.subscribe_in(&sub_input, window, |launcher, input, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     launcher.on_sub_input_confirm(input, window, cx);
                 }
-            },
-        );
+            });
 
         // Periodically check for app updates and refresh the list.
         let list_clone = list.clone();
         let window_handle = window.window_handle();
-        let app_refresh_task = cx.spawn_in(window, async move |_launcher, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(200))
-                .await;
+        let app_refresh_task = cx.spawn_in(window, async move |_launcher, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
 
-            let _ = window_handle.update(cx, |_view, _window, cx| {
-                if crate::check_apps_updated(cx) {
-                    // Refresh the apps list
-                    let all_apps = crate::app_index(cx);
-                    let apps_only = crate::config::Config::load().apps_only;
+                let _ = window_handle.update(cx, |_view, _window, cx| {
+                    if crate::check_apps_updated(cx) {
+                        // Refresh the apps list
+                        let all_apps = crate::app_index(cx);
+                        let apps_only = crate::config::Config::load().apps_only;
 
-                    let _ = list_clone.update(cx, |state, cx| {
-                        let delegate = state.delegate_mut();
-                        let query = delegate.last_query.clone();
-                        delegate.apps = all_apps;
-                        delegate.apps_only = apps_only;
-                        delegate.apply_query(&query);
-                        let count = delegate.total_count();
-                        state.set_selected_index(
-                            (count > 0).then(|| IndexPath::new(0)),
-                            _window,
-                            cx,
-                        );
-                        state.scroll_to_selected_item(_window, cx);
-                        cx.notify();
-                    });
-                }
-            });
+                        let tuning = crate::search_tuning(cx);
+                        let _ = list_clone.update(cx, |state, cx| {
+                            let delegate = state.delegate_mut();
+                            let query = delegate.last_query.clone();
+                            delegate.apps = all_apps;
+                            delegate.apps_only = apps_only;
+                            delegate.tuning = tuning;
+                            delegate.apply_query(&query);
+                            let count = delegate.total_count();
+                            state.set_selected_index(
+                                (count > 0).then(|| IndexPath::new(0)),
+                                _window,
+                                cx,
+                            );
+                            state.scroll_to_selected_item(_window, cx);
+                            cx.notify();
+                        });
+                    }
+                });
+            }
         });
 
         Self {
@@ -269,7 +307,8 @@ impl LauncherView {
     }
 
     pub fn focus_query(&self, window: &mut Window, cx: &mut App) {
-        self.query_input.update(cx, |state, cx| state.focus(window, cx));
+        self.query_input
+            .update(cx, |state, cx| state.focus(window, cx));
     }
 
     fn on_query_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -280,11 +319,7 @@ impl LauncherView {
             let delegate = state.delegate_mut();
             let (generation, prefix_mode) = delegate.apply_query(&query);
             let count = delegate.total_count();
-            state.set_selected_index(
-                (count > 0).then(|| IndexPath::new(0)),
-                window,
-                cx,
-            );
+            state.set_selected_index((count > 0).then(|| IndexPath::new(0)), window, cx);
             state.scroll_to_selected_item(window, cx);
             cx.notify();
             (generation, prefix_mode)
@@ -325,23 +360,25 @@ impl LauncherView {
                 return;
             }
 
-            let results = cx.background_executor().spawn(async move {
-                let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
-                let mut rows = Vec::new();
-                for plugin in manager.plugins.iter_mut() {
-                    if !plugin.available() {
-                        continue;
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut rows = Vec::new();
+                    for plugin in manager.plugins.iter_mut() {
+                        if !plugin.available() {
+                            continue;
+                        }
+                        for item in plugin.query(&rest) {
+                            rows.push(Row::Plugin {
+                                plugin_name: plugin.name.clone(),
+                                item,
+                            });
+                        }
                     }
-                    for item in plugin.query(&rest) {
-                        rows.push(Row::Plugin {
-                            plugin_name: plugin.name.clone(),
-                            item,
-                        });
-                    }
-                }
-                rows
-            })
-            .await;
+                    rows
+                })
+                .await;
 
             if !is_current() {
                 return;
@@ -594,12 +631,15 @@ impl Render for LauncherView {
                 }
 
                 // Results fill the rest of the card.
-                root = root.child(div().flex_1().min_h_0().child(List::new(&list).w_full().h_full()));
+                root = root.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(List::new(&list).w_full().h_full()),
+                );
             }
             Mode::SubInput {
-                plugin_name,
-                title,
-                ..
+                plugin_name, title, ..
             } => {
                 root = root.flex().flex_col().child(
                     div()
@@ -610,10 +650,7 @@ impl Render for LauncherView {
                         .gap_2()
                         .text_size(px(12.0))
                         .text_color(pal.text_secondary)
-                        .child(format!(
-                            "↳ {}:{} — 二级输入，Esc 返回",
-                            plugin_name, title
-                        ))
+                        .child(format!("↳ {}:{} — 二级输入，Esc 返回", plugin_name, title))
                         .child(Input::new(&self.sub_input).w_full().large()),
                 );
             }
@@ -627,7 +664,7 @@ impl Render for LauncherView {
 mod tests {
     // Imported explicitly rather than via `super::*`: the parent glob-imports
     // gpui, whose `test` attribute would shadow the built-in one here.
-    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row};
+    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row, SearchTuning};
     use crate::apps::AppEntry;
     use std::sync::Arc;
 
@@ -643,6 +680,8 @@ mod tests {
             last_query: String::new(),
             search_generation: 0,
             apps_only: false,
+            usage: Arc::new(crate::usage::UsageStore::in_memory()),
+            tuning: SearchTuning::default(),
         }
     }
 

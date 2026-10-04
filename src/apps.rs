@@ -10,8 +10,8 @@ use pinyin::ToPinyinMulti;
 // Search keys
 // ---------------------------------------------------------------------------
 
-/// Which field a search key came from. The weight is the ranking preference
-/// applied to a similarity score, in thousandths: a bundle-name match ranks
+/// Which field a search key came from. The scorer applies a preference per
+/// kind (see `search::SearchTuning::bundle_weight`): a bundle-name match ranks
 /// just below an equally good match on the display name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyKind {
@@ -20,18 +20,6 @@ pub enum KeyKind {
     BundleFull,
     FolderFull,
     FolderAbbr,
-}
-
-impl KeyKind {
-    pub fn weight(self) -> u32 {
-        match self {
-            KeyKind::BundleFull => 980,
-            KeyKind::DisplayFull
-            | KeyKind::DisplayAbbr
-            | KeyKind::FolderFull
-            | KeyKind::FolderAbbr => 1000,
-        }
-    }
 }
 
 /// A spelling under construction: folded bytes, each flagged when it starts a

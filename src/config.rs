@@ -45,9 +45,9 @@ fn backup_path(path: &std::path::Path) -> PathBuf {
 /// if the backup cannot be written, the modification fails and the original
 /// file is left untouched.
 pub fn modify(f: impl FnOnce(&mut Config)) -> std::io::Result<()> {
-    let _guard = CONFIG_MUTEX.lock().map_err(|e| {
-        std::io::Error::other(format!("config mutex poisoned: {e}"))
-    })?;
+    let _guard = CONFIG_MUTEX
+        .lock()
+        .map_err(|e| std::io::Error::other(format!("config mutex poisoned: {e}")))?;
     let loaded = Config::read();
     if let Some(unusable) = loaded.unusable {
         let backup = backup_path(&unusable.path);
@@ -98,6 +98,9 @@ pub struct Config {
     /// When true, disable the `>` plugin routing entirely: every query is
     /// searched against local applications only.
     pub apps_only: bool,
+    /// Scoring knobs for the launcher search; missing values keep the
+    /// defaults, so an older config file stays valid.
+    pub search: crate::search::SearchTuning,
 }
 
 impl Config {
@@ -129,7 +132,10 @@ impl Config {
                     unusable: None,
                 },
                 Err(e) => {
-                    eprintln!("[config] failed to parse {}: {e}; using defaults", path.display());
+                    eprintln!(
+                        "[config] failed to parse {}: {e}; using defaults",
+                        path.display()
+                    );
                     Loaded {
                         config: Self::default(),
                         unusable: Some(UnusableConfig {
@@ -144,7 +150,10 @@ impl Config {
                 unusable: None,
             },
             Err(e) => {
-                eprintln!("[config] failed to read {}: {e}; using defaults", path.display());
+                eprintln!(
+                    "[config] failed to read {}: {e}; using defaults",
+                    path.display()
+                );
                 Loaded {
                     config: Self::default(),
                     unusable: Some(UnusableConfig {
