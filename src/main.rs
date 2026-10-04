@@ -154,6 +154,7 @@ fn main() {
             Arc::new(RwLock::new(Arc::new(Vec::new())));
         let plugin_manager = Arc::new(std::sync::Mutex::new(plugins::PluginManager {
             plugins: Vec::new(),
+            legacy: Vec::new(),
         }));
         let usage = Arc::new(usage::UsageStore::load());
         let search_tuning = config.search.clamped();

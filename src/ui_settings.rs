@@ -630,17 +630,22 @@ impl SettingsView {
         cx.background_executor()
             .spawn(async move {
                 let outcome = match crate::plugins::install_script(&source) {
-                    Ok(file_name) => {
+                    Ok(installed) => {
                         // A plugin the user had switched off under the same name
                         // must not keep the freshly installed copy off, and the
                         // runtimes of the other plugins stay untouched.
+                        let file_name = installed.file_name.clone();
                         if let Err(e) = crate::config::modify(|config| {
                             config.plugins.insert(file_name.clone(), true);
                         }) {
                             eprintln!("[plugin] failed to enable {file_name}: {e:#}");
                         }
-                        let (loaded_error, duplicates) = {
+                        // The other versions of the same plugin (same author and
+                        // name) are switched off, so one plugin means one active
+                        // version instead of two identical rows.
+                        let (loaded_error, superseded) = {
                             let mut manager = pm.lock().unwrap_or_else(|e| e.into_inner());
+                            let superseded = manager.adopt_installed(&installed);
                             let error = match manager.load_installed(&file_name) {
                                 Err(e) => Some(format!("{e:#}")),
                                 Ok(()) => manager
@@ -649,25 +654,26 @@ impl SettingsView {
                                     .find(|plugin| plugin.file_name == file_name)
                                     .and_then(|plugin| plugin.error.clone()),
                             };
-                            (error, manager.duplicates_of(&file_name))
+                            (error, superseded)
                         };
+                        let mut message = if installed.replaced {
+                            format!("已更新 {file_name}")
+                        } else {
+                            format!("已安装 {file_name}")
+                        };
+                        if !superseded.is_empty() {
+                            message.push_str(&format!(
+                                "；同插件的旧版本已停用：{}",
+                                superseded.join("、")
+                            ));
+                        }
                         match loaded_error {
                             Some(error) => InstallStatus {
-                                message: format!("已安装 {file_name}，但加载失败: {error}"),
+                                message: format!("{message}，但加载失败: {error}"),
                                 failed: true,
                             },
-                            // Two copies of the same plugin both stay enabled:
-                            // say so instead of silently listing the same name
-                            // twice with no explanation.
-                            None if !duplicates.is_empty() => InstallStatus {
-                                message: format!(
-                                    "已安装 {file_name}（与已存在的 {} 看起来是同一个插件，都在启用中）",
-                                    duplicates.join("、")
-                                ),
-                                failed: false,
-                            },
                             None => InstallStatus {
-                                message: format!("已安装 {file_name}"),
+                                message,
                                 failed: false,
                             },
                         }
