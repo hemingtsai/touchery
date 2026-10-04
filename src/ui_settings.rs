@@ -89,6 +89,25 @@ impl TuningSliders {
     }
 }
 
+/// Snapshot row of the usage history for rendering.
+struct UsageRowView {
+    display: String,
+    count: u32,
+    age: String,
+}
+
+/// "刚刚" / "12 分钟前" / "3 小时前" / "2 天前" / "5 个月前".
+fn humanize_age(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    match seconds {
+        0..=59 => "刚刚".to_string(),
+        60..=3599 => format!("{} 分钟前", seconds / 60),
+        3600..=86_399 => format!("{} 小时前", seconds / 3600),
+        86_400..=2_591_999 => format!("{} 天前", seconds / 86_400),
+        _ => format!("{} 个月前", seconds / 2_592_000),
+    }
+}
+
 /// Snapshot row of a plugin for rendering.
 #[derive(Clone, PartialEq)]
 struct PluginRowView {
@@ -215,6 +234,36 @@ impl SettingsView {
             },
         );
         cx.notify();
+    }
+
+    /// The apps with a launch history, best first, resolved to their current
+    /// display name.
+    fn usage_rows(&self, cx: &App) -> Vec<UsageRowView> {
+        let usage = crate::usage_store(cx);
+        let now = crate::usage::now_unix();
+        let apps = crate::app_index(cx);
+        usage
+            .top(10, now)
+            .into_iter()
+            .map(|(path, entry)| {
+                let display = apps
+                    .iter()
+                    .find(|app| app.path == path)
+                    .map(|app| app.display_name.clone())
+                    .unwrap_or_else(|| {
+                        if entry.name.is_empty() {
+                            path.clone()
+                        } else {
+                            entry.name.clone()
+                        }
+                    });
+                UsageRowView {
+                    display,
+                    count: entry.count,
+                    age: humanize_age(now - entry.last_used),
+                }
+            })
+            .collect()
     }
 
     /// One labelled slider row.
@@ -883,6 +932,82 @@ impl Render for SettingsView {
         );
         root = root.child(tuning_section);
 
+        // ---- usage history section ----
+        let usage_rows = self.usage_rows(cx);
+        let usage_count = crate::usage_store(cx).count();
+        let mut usage_section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(title(format!(
+                "使用记录 ({}) — 文件: ~/Library/Application Support/touchery/usage.json",
+                usage_count
+            )))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(pal.text_secondary)
+                    .child("打开启动器时按习惯排序：用得越多、越近，越靠前；相似度差距较大时仍以文本匹配为准"),
+            );
+
+        if usage_rows.is_empty() {
+            usage_section = usage_section.child(
+                div()
+                    .py_2()
+                    .text_size(px(12.0))
+                    .text_color(pal.text_secondary)
+                    .child("还没有记录，从启动器打开应用后就会出现"),
+            );
+        } else {
+            for row in &usage_rows {
+                usage_section = usage_section.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_2()
+                        .px_3()
+                        .rounded_md()
+                        .bg(pal.row_bg)
+                        .overflow_hidden()
+                        .child(
+                            div().flex_1().min_w(px(0.)).overflow_hidden().child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .whitespace_nowrap()
+                                    .truncate()
+                                    .text_color(pal.text_primary)
+                                    .child(row.display.clone()),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.0))
+                                .whitespace_nowrap()
+                                .text_color(pal.text_secondary)
+                                .child(format!("{} 次 · {}", row.count, row.age)),
+                        ),
+                );
+            }
+        }
+
+        usage_section = usage_section.child(
+            div().flex().items_center().gap_3().child(
+                Button::new("usage-clear")
+                    .label("清除使用记录")
+                    .danger()
+                    .on_click(cx.listener(|_view, _: &ClickEvent, _window, cx| {
+                        match crate::usage_store(cx).clear() {
+                            Ok(()) => {}
+                            Err(e) => eprintln!("[settings] failed to clear usage: {e}"),
+                        }
+                        cx.notify();
+                    })),
+            ),
+        );
+        root = root.child(usage_section);
+
         // ---- plugins section ----
         let mut section = div().flex().flex_col().gap_2().child(title(format!(
             "插件 ({}) — 目录: ~/Library/Application Support/touchery/plugins",
@@ -905,5 +1030,25 @@ impl Render for SettingsView {
         root = root.child(section);
 
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::humanize_age;
+
+    #[test]
+    fn ages_are_worded_for_people() {
+        assert_eq!(humanize_age(0), "刚刚");
+        assert_eq!(humanize_age(59), "刚刚");
+        assert_eq!(humanize_age(60), "1 分钟前");
+        assert_eq!(humanize_age(3599), "59 分钟前");
+        assert_eq!(humanize_age(3600), "1 小时前");
+        assert_eq!(humanize_age(86_399), "23 小时前");
+        assert_eq!(humanize_age(86_400), "1 天前");
+        assert_eq!(humanize_age(2_591_999), "29 天前");
+        assert_eq!(humanize_age(2_592_000), "1 个月前");
+        // A clock that jumped backwards reads as "just now", never negative.
+        assert_eq!(humanize_age(-500), "刚刚");
     }
 }
