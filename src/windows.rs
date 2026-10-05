@@ -32,6 +32,10 @@ unsafe extern "C" {
     static kCGWindowOwnerPID: *const Object;
     static kCGWindowNumber: *const Object;
     static kCGWindowLayer: *const Object;
+    /// Whether Screen Recording is already granted; does not prompt.
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    /// Prompts for Screen Recording (at most once per application).
+    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 // The accessibility constants live in HIServices, inside ApplicationServices,
@@ -369,6 +373,24 @@ fn raw_windows() -> Vec<WindowInfo> {
 /// Whether this process may use the accessibility API.
 pub fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Whether macOS will hand out other applications' window titles.
+///
+/// This is the Screen Recording permission. It is the alternative to the
+/// accessibility permission for *titles*: `CGWindowListCopyWindowInfo` reports
+/// `kCGWindowName` once it is granted, but macOS only notices the grant after
+/// the application is restarted, and it does nothing for raising a specific
+/// window.
+pub fn screen_recording_allowed() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Ask for the Screen Recording permission.
+pub fn request_screen_recording() {
+    unsafe {
+        CGRequestScreenCaptureAccess();
+    }
 }
 
 /// Ask macOS to show the accessibility prompt for this application.

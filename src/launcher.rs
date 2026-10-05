@@ -25,9 +25,8 @@ pub const NEW_INSTANCE_PREFIX: &str = "@";
 /// Placeholder of the search field.
 const QUERY_PLACEHOLDER: &str = "搜索应用；@ 新窗口；! 切换窗口；> 调用插件";
 
-/// Set once the accessibility prompt has been shown, so using `!` cannot nag.
-static ACCESSIBILITY_ASKED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Set once the permission prompt has been shown, so using `!` cannot nag.
+static PERMISSION_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Shown while the query carries the new-instance prefix.
 const NEW_INSTANCE_PLACEHOLDER: &str =
@@ -35,7 +34,7 @@ const NEW_INSTANCE_PLACEHOLDER: &str =
 
 /// Shown instead when macOS refuses to hand out window titles.
 const WINDOW_PLACEHOLDER: &str =
-    "窗口标题不可见（授予 Touchery「辅助功能」权限可精确到窗口）——现在只能按应用切换";
+    "窗口标题不可见（列表末尾可申请「屏幕录制」权限，授权后重启）——现在只能按应用切换";
 
 /// What a query is routed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +42,29 @@ pub enum QueryMode {
     Apps,
     Plugins,
     Windows,
+}
+
+/// Which permission rows the degraded window list offers, in the order to try
+/// them: Screen Recording first because it is what makes macOS hand out titles,
+/// accessibility second because it also raises a specific window.
+fn permission_rows(needs_screen_recording: bool, needs_accessibility: bool) -> Vec<Row> {
+    let mut rows = Vec::new();
+    if needs_screen_recording {
+        rows.push(Row::WindowScreenRecording);
+    }
+    if needs_accessibility {
+        rows.push(Row::WindowPermission);
+    }
+    rows
+}
+
+/// Open one of the Privacy panes in System Settings.
+fn open_privacy_pane(pane: &str) {
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+    // `open` waits for LaunchServices, so reap it off the UI thread.
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("open").arg(url).status();
+    });
 }
 
 /// The command that starts an application bundle.
@@ -65,8 +87,10 @@ pub enum Row {
     App(usize),
     /// Index into `LauncherDelegate::windows`.
     Window(usize),
-    /// Offered only when macOS withholds window titles: grants the
-    /// accessibility permission that makes the mode useful.
+    /// Offered only while macOS withholds window titles and the permission is
+    /// missing: Screen Recording is what makes `CGWindowList` report titles.
+    WindowScreenRecording,
+    /// The other remedy, and the one that also raises a specific window.
     WindowPermission,
     Plugin {
         /// Identity of the plugin for dispatch: its file stem.
@@ -175,9 +199,12 @@ impl LauncherDelegate {
             self.new_instance = false;
             if untitled {
                 // Without titles the list is one row per application, so offer
-                // the permission that unlocks the real thing. It sits last, so
+                // the permissions that unlock the real thing. They sit last, so
                 // the default selection still starts on a window.
-                self.window_rows.push(Row::WindowPermission);
+                self.window_rows.extend(permission_rows(
+                    !crate::windows::screen_recording_allowed(),
+                    !crate::windows::accessibility_trusted(),
+                ));
             }
             self.search_generation += 1;
             (self.search_generation, QueryMode::Windows)
@@ -239,9 +266,10 @@ impl ListDelegate for LauncherDelegate {
         let text = match self.row_at(ix.row)? {
             Row::App(app_idx) => self.apps[*app_idx].display_name.clone(),
             Row::Window(window_idx) => self.windows[*window_idx].label(),
-            Row::WindowPermission => {
-                "授予「辅助功能」权限以按窗口切换（当前只能按应用切换）".to_string()
+            Row::WindowScreenRecording => {
+                "授予「屏幕录制」权限：读取窗口标题（授权后需重启 Touchery）".to_string()
             }
+            Row::WindowPermission => "授予「辅助功能」权限：精确切到某个窗口".to_string(),
             Row::Plugin {
                 plugin_label, item, ..
             } => format!("{}:{}", plugin_label, item.title),
@@ -456,14 +484,15 @@ impl LauncherView {
             // started.
             if mode == QueryMode::Windows
                 && untitled
-                && !crate::windows::accessibility_trusted()
-                && !ACCESSIBILITY_ASKED.swap(true, Ordering::SeqCst)
+                && !crate::windows::screen_recording_allowed()
+                && !PERMISSION_ASKED.swap(true, Ordering::SeqCst)
             {
                 // Titles are unavailable, which makes `!` an application
-                // switcher: ask for the permission that unlocks the real thing.
-                // macOS shows this at most once per application, and the flag
-                // keeps a keystroke from re-asking.
-                crate::windows::request_accessibility();
+                // switcher. Screen Recording is the permission that makes
+                // `CGWindowList` report them, so that is the one to ask for;
+                // macOS prompts at most once per application and wants a
+                // restart afterwards, both of which the row explains.
+                crate::windows::request_screen_recording();
             }
             let placeholder = if mode == QueryMode::Windows && untitled {
                 WINDOW_PLACEHOLDER
@@ -650,15 +679,16 @@ impl LauncherView {
                 })
                 .detach();
             }
+            Row::WindowScreenRecording => {
+                // Screen Recording is what makes macOS hand out the titles; the
+                // grant only takes effect after a restart, which the label says.
+                crate::windows::request_screen_recording();
+                open_privacy_pane("Privacy_ScreenCapture");
+                crate::dismiss_launcher(window, cx);
+            }
             Row::WindowPermission => {
-                // Ask through the accessibility prompt and open the pane, since
-                // macOS only shows the prompt once per application.
                 crate::windows::request_accessibility();
-                std::thread::spawn(|| {
-                    let _ = std::process::Command::new("open")
-                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-                        .status();
-                });
+                open_privacy_pane("Privacy_Accessibility");
                 crate::dismiss_launcher(window, cx);
             }
             Row::Window(window_idx) => {
@@ -854,7 +884,7 @@ mod tests {
     // gpui, whose `test` attribute would shadow the built-in one here.
     use super::{
         LauncherDelegate, PLUGIN_PREFIX, PluginItem, QueryMode, Row, SearchTuning, WINDOW_PREFIX,
-        open_command,
+        open_command, permission_rows,
     };
     use crate::apps::AppEntry;
     use std::sync::Arc;
@@ -878,6 +908,28 @@ mod tests {
             windows_untitled: false,
             new_instance: false,
         }
+    }
+
+    #[test]
+    fn the_permission_rows_follow_what_is_missing() {
+        assert!(
+            permission_rows(false, false).is_empty(),
+            "nothing to ask for"
+        );
+
+        let rows = permission_rows(true, false);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Row::WindowScreenRecording));
+
+        let rows = permission_rows(false, true);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Row::WindowPermission));
+
+        // Both missing: Screen Recording first, it is what yields titles.
+        let rows = permission_rows(true, true);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], Row::WindowScreenRecording));
+        assert!(matches!(rows[1], Row::WindowPermission));
     }
 
     #[test]
