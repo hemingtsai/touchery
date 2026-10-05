@@ -126,7 +126,33 @@ const ACCESSIBILITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_s
 /// Only when neither can produce a title does the list degrade to one row per
 /// Dock application — with the flag set, so the caller can say why.
 pub fn list_windows() -> (Vec<WindowInfo>, bool) {
-    let raw = list();
+    // `CGWindowList` first: no permission needed and it reports the real
+    // front-to-back order. It hands out titles only with the Screen Recording
+    // permission, which is why the accessibility list is fetched when every
+    // title came back empty — note that an empty list can also mean "all
+    // windows are minimized", so the accessibility list is worth asking for
+    // even then.
+    let raw = raw_windows();
+    let accessible = if raw.iter().all(|window| window.title.is_empty()) && accessibility_trusted()
+    {
+        Some(list_via_accessibility())
+    } else {
+        None
+    };
+    choose_windows(raw, accessible, is_regular_application)
+}
+
+/// Decide what the `!` prefix offers.
+///
+/// Three-way degradation, and the middle step is the one that is easy to get
+/// wrong: a titled `CGWindowList` wins, an accessibility list is used when macOS
+/// withheld the titles, and only when neither produced a title does the list
+/// become one row per application (with `true`, so the caller can explain).
+fn choose_windows(
+    raw: Vec<WindowInfo>,
+    accessible: Option<Vec<WindowInfo>>,
+    is_regular: impl Fn(i32) -> bool,
+) -> (Vec<WindowInfo>, bool) {
     let titled: Vec<WindowInfo> = raw
         .iter()
         .filter(|window| !window.title.is_empty())
@@ -135,22 +161,22 @@ pub fn list_windows() -> (Vec<WindowInfo>, bool) {
     if !titled.is_empty() {
         return (titled, false);
     }
+    if let Some(accessible) = accessible
+        && !accessible.is_empty()
+    {
+        return (accessible, false);
+    }
     if raw.is_empty() {
         return (Vec::new(), false);
     }
 
-    if accessibility_trusted() {
-        let accessible = list_via_accessibility();
-        if !accessible.is_empty() {
-            return (accessible, false);
-        }
-    }
-
+    // One row per application *name*: two instances of the same application are
+    // one entry in a switcher, and the front-most one (first here) wins.
     let mut seen = std::collections::HashSet::new();
     let fallback = raw
         .into_iter()
-        .filter(|window| is_regular_application(window.pid))
-        .filter(|window| seen.insert(window.pid))
+        .filter(|window| is_regular(window.pid))
+        .filter(|window| seen.insert(window.app.to_lowercase()))
         .map(|mut window| {
             window.title.clear();
             window
@@ -296,9 +322,13 @@ fn is_regular_application(pid: i32) -> bool {
     }
 }
 
-/// Every on-screen window of other applications, front to back, titles as
-/// macOS reports them (possibly empty).
-fn list() -> Vec<WindowInfo> {
+/// Every on-screen window of other applications, front to back, with the
+/// titles macOS is willing to give us (possibly all empty).
+///
+/// Untitled windows are *kept* here: whether they exist is how the caller tells
+/// "macOS withheld the titles" apart from "nothing is open", and the degraded
+/// per-application list is built from them.
+fn raw_windows() -> Vec<WindowInfo> {
     let mut windows = Vec::new();
     unsafe {
         let array = CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP_ELEMENTS, 0);
@@ -320,9 +350,6 @@ fn list() -> Vec<WindowInfo> {
                 continue;
             }
             let title = string(info, kCGWindowName);
-            if title.is_empty() {
-                continue;
-            }
             let app = string(info, kCGWindowOwnerName);
             if app.is_empty() {
                 continue;
@@ -570,6 +597,61 @@ mod tests {
         assert_eq!(window("Safari", "Docs").label(), "Safari · Docs");
         assert_eq!(window("Safari", "").label(), "Safari");
         assert_eq!(window("Safari", "Safari tips").label(), "Safari tips");
+    }
+
+    /// macOS withheld every title: `CGWindowList` still knows the windows, so
+    /// the accessibility list is the next source.
+    #[test]
+    fn hidden_titles_fall_back_to_the_accessibility_list() {
+        let raw = [window("Safari", ""), window("Notes", "")];
+        let accessible = [window("Safari", "Docs"), window("Notes", "Todo")];
+        let (windows, withheld) = choose_windows(raw.to_vec(), Some(accessible.to_vec()), |_| true);
+        assert_eq!(windows, accessible.to_vec());
+        assert!(!withheld, "titles were obtained after all");
+    }
+
+    /// Neither source could produce a title: one row per application, and the
+    /// flag that makes the caller explain why.
+    #[test]
+    fn without_any_permission_the_list_is_one_row_per_application() {
+        let untitled = |app: &str, pid: i32| WindowInfo {
+            app: app.to_string(),
+            title: String::new(),
+            pid,
+            number: pid as u32,
+        };
+        let raw = [
+            untitled("Safari", 1),
+            untitled("Safari", 9), // a second instance of the same application
+            untitled("Notes", 2),
+            untitled("SomeHelper", 3),
+        ];
+        // 1 and 2 are Dock applications, 3 is a helper.
+        let (windows, withheld) = choose_windows(raw.to_vec(), None, |pid| pid != 3);
+        assert!(withheld);
+        assert_eq!(windows.len(), 2, "one row per application: {:?}", windows);
+        assert!(windows.iter().all(|window| window.title.is_empty()));
+        assert_eq!(windows[0].app, "Safari");
+        assert_eq!(windows[1].app, "Notes");
+    }
+
+    /// Nothing is open at all — not the same thing as hidden titles, and it must
+    /// not produce the permission notice.
+    #[test]
+    fn an_empty_window_list_is_not_a_permission_problem() {
+        let (windows, withheld) = choose_windows(Vec::new(), None, |_| true);
+        assert!(windows.is_empty());
+        assert!(!withheld, "no windows is not a missing permission");
+    }
+
+    /// Titles present: they win, and the accessibility list is not even asked
+    /// for (the caller passes `None`).
+    #[test]
+    fn titles_from_the_window_list_win() {
+        let raw = [window("Safari", "Docs"), window("Notes", "Todo")];
+        let (windows, withheld) = choose_windows(raw.to_vec(), None, |_| true);
+        assert_eq!(windows, raw.to_vec());
+        assert!(!withheld);
     }
 
     /// The list has to be usable on this machine: either real titles, or the

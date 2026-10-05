@@ -25,6 +25,10 @@ pub const NEW_INSTANCE_PREFIX: &str = "@";
 /// Placeholder of the search field.
 const QUERY_PLACEHOLDER: &str = "搜索应用；@ 新窗口；! 切换窗口；> 调用插件";
 
+/// Set once the accessibility prompt has been shown, so using `!` cannot nag.
+static ACCESSIBILITY_ASKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Shown while the query carries the new-instance prefix.
 const NEW_INSTANCE_PLACEHOLDER: &str =
     "新窗口模式：回车用 open -n 启动新实例（拒绝多开的应用会忽略）";
@@ -450,6 +454,17 @@ impl LauncherView {
             // Say which mode the next Enter will use in the search field
             // itself: `!` needs titles to be useful, `@` changes how the app is
             // started.
+            if mode == QueryMode::Windows
+                && untitled
+                && !crate::windows::accessibility_trusted()
+                && !ACCESSIBILITY_ASKED.swap(true, Ordering::SeqCst)
+            {
+                // Titles are unavailable, which makes `!` an application
+                // switcher: ask for the permission that unlocks the real thing.
+                // macOS shows this at most once per application, and the flag
+                // keeps a keystroke from re-asking.
+                crate::windows::request_accessibility();
+            }
             let placeholder = if mode == QueryMode::Windows && untitled {
                 WINDOW_PLACEHOLDER
             } else if query.starts_with(NEW_INSTANCE_PREFIX) {
