@@ -18,8 +18,16 @@ pub const PLUGIN_PREFIX: &str = ">";
 /// Prefix that searches the windows of running applications.
 pub const WINDOW_PREFIX: &str = "!";
 
+/// Prefix that opens the application in a new instance — a second window for
+/// most apps — instead of reusing the running copy.
+pub const NEW_INSTANCE_PREFIX: &str = "@";
+
 /// Placeholder of the search field.
-const QUERY_PLACEHOLDER: &str = "搜索应用；! 切换窗口；> 调用插件";
+const QUERY_PLACEHOLDER: &str = "搜索应用；@ 新窗口；! 切换窗口；> 调用插件";
+
+/// Shown while the query carries the new-instance prefix.
+const NEW_INSTANCE_PLACEHOLDER: &str =
+    "新窗口模式：回车用 open -n 启动新实例（拒绝多开的应用会忽略）";
 
 /// Shown instead when macOS refuses to hand out window titles.
 const WINDOW_PLACEHOLDER: &str =
@@ -119,6 +127,9 @@ pub struct LauncherDelegate {
     /// macOS withheld every window title, so the list is one row per
     /// application (see `windows::list_windows`).
     windows_untitled: bool,
+    /// The query carried the new-instance prefix, so the next launch asks for
+    /// another instance.
+    new_instance: bool,
 }
 
 impl LauncherDelegate {
@@ -157,6 +168,7 @@ impl LauncherDelegate {
                 .collect();
             self.windows = windows;
             self.windows_untitled = untitled;
+            self.new_instance = false;
             if untitled {
                 // Without titles the list is one row per application, so offer
                 // the permission that unlocks the real thing. It sits last, so
@@ -171,6 +183,7 @@ impl LauncherDelegate {
             self.window_rows.clear();
             self.windows.clear();
             self.windows_untitled = false;
+            self.new_instance = false;
             self.search_generation += 1;
             (self.search_generation, QueryMode::Plugins)
         } else {
@@ -178,6 +191,18 @@ impl LauncherDelegate {
             self.window_rows.clear();
             self.windows.clear();
             self.windows_untitled = false;
+            // `@` is not a mode of its own: it marks the launch, and the rest
+            // of the query is the ordinary application search.
+            let query = match query.strip_prefix(NEW_INSTANCE_PREFIX) {
+                Some(rest) => {
+                    self.new_instance = true;
+                    rest.trim_start()
+                }
+                None => {
+                    self.new_instance = false;
+                    query
+                }
+            };
             self.search_generation += 1;
             let context = SearchContext {
                 apps_only: self.apps_only,
@@ -300,6 +325,7 @@ impl LauncherView {
             window_rows: Vec::new(),
             windows: Vec::new(),
             windows_untitled: false,
+            new_instance: false,
         };
 
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
@@ -421,10 +447,13 @@ impl LauncherView {
             // does not execute plugins or overwrite the app results.
             self.plugin_query_generation.fetch_add(1, Ordering::SeqCst);
             self.plugin_query_task = None;
-            // `!` can only match titles while macOS hands them out: say so in
-            // the search field instead of showing an unexplained list.
+            // Say which mode the next Enter will use in the search field
+            // itself: `!` needs titles to be useful, `@` changes how the app is
+            // started.
             let placeholder = if mode == QueryMode::Windows && untitled {
                 WINDOW_PLACEHOLDER
+            } else if query.starts_with(NEW_INSTANCE_PREFIX) {
+                NEW_INSTANCE_PLACEHOLDER
             } else {
                 QUERY_PLACEHOLDER
             };
@@ -566,9 +595,9 @@ impl LauncherView {
                 // the window. Waiting for the exit status also reaps the child
                 // (dropping a Child leaves a zombie behind) and tells us
                 // whether the bundle really started.
-                // Read once, before the window goes away, so a change in the
-                // control panel applies to the very next launch.
-                let new_window = crate::config::Config::load().new_window;
+                // Whether the query asked for another instance (`@` prefix),
+                // read before the window goes away.
+                let new_window = self.list.read(cx).delegate().new_instance;
                 cx.spawn(async move |launcher, cx| {
                     let open_path = path.clone();
                     let status = cx
@@ -832,6 +861,7 @@ mod tests {
             window_rows: Vec::new(),
             windows: Vec::new(),
             windows_untitled: false,
+            new_instance: false,
         }
     }
 
@@ -860,7 +890,26 @@ mod tests {
     }
 
     #[test]
-    fn the_new_window_switch_only_adds_the_flag() {
+    fn the_new_instance_prefix_only_marks_the_launch() {
+        let mut plain = delegate(vec![app("Safari", "/Applications/Safari.app")]);
+        let (_, mode) = plain.apply_query("saf");
+        assert_eq!(mode, QueryMode::Apps);
+        assert!(!plain.new_instance);
+        let listed = plain.app_rows.len();
+
+        let mut fresh = delegate(vec![app("Safari", "/Applications/Safari.app")]);
+        let (_, mode) = fresh.apply_query("@saf");
+        assert_eq!(mode, QueryMode::Apps, "`@` still searches applications");
+        assert!(fresh.new_instance);
+        assert_eq!(fresh.app_rows.len(), listed, "and finds the same ones");
+
+        // Leaving the prefix clears it again.
+        let (_, _) = fresh.apply_query("saf");
+        assert!(!fresh.new_instance);
+    }
+
+    #[test]
+    fn the_new_instance_flag_only_adds_the_option() {
         let plain = open_command("/Applications/Safari.app", false);
         assert_eq!(plain.get_program(), "open");
         assert_eq!(
