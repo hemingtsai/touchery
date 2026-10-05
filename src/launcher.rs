@@ -15,6 +15,24 @@ actions!(launcher, [LauncherCancel]);
 /// Prefix that routes the query to plugins instead of local apps.
 pub const PLUGIN_PREFIX: &str = ">";
 
+/// Prefix that searches the windows of running applications.
+pub const WINDOW_PREFIX: &str = "!";
+
+/// Placeholder of the search field.
+const QUERY_PLACEHOLDER: &str = "搜索应用；! 切换窗口；> 调用插件";
+
+/// Shown instead when macOS refuses to hand out window titles.
+const WINDOW_PLACEHOLDER: &str =
+    "窗口标题不可见（授予 Touchery「辅助功能」权限可精确到窗口）——现在只能按应用切换";
+
+/// What a query is routed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryMode {
+    Apps,
+    Plugins,
+    Windows,
+}
+
 /// The command that starts an application bundle.
 ///
 /// Plain `open` reuses a running application: macOS activates it and the app
@@ -33,6 +51,11 @@ fn open_command(path: &str, new_window: bool) -> std::process::Command {
 #[derive(Clone)]
 pub enum Row {
     App(usize),
+    /// Index into `LauncherDelegate::windows`.
+    Window(usize),
+    /// Offered only when macOS withholds window titles: grants the
+    /// accessibility permission that makes the mode useful.
+    WindowPermission,
     Plugin {
         /// Identity of the plugin for dispatch: its file stem.
         plugin_name: String,
@@ -89,31 +112,72 @@ pub struct LauncherDelegate {
     usage: Arc<crate::usage::UsageStore>,
     /// Scoring knobs, re-read from the global state when the index refreshes.
     tuning: SearchTuning,
+    /// Windows matching the last `!` query, in list order.
+    window_rows: Vec<Row>,
+    /// Snapshot the `window_rows` index into.
+    windows: Vec<crate::windows::WindowInfo>,
+    /// macOS withheld every window title, so the list is one row per
+    /// application (see `windows::list_windows`).
+    windows_untitled: bool,
 }
 
 impl LauncherDelegate {
     fn total_count(&self) -> usize {
-        self.app_rows.len() + self.plugin_rows.len()
+        self.app_rows.len() + self.plugin_rows.len() + self.window_rows.len()
     }
 
     fn row_at(&self, row: usize) -> Option<&Row> {
         if row < self.app_rows.len() {
             self.app_rows.get(row)
-        } else {
+        } else if row < self.app_rows.len() + self.plugin_rows.len() {
             self.plugin_rows.get(row - self.app_rows.len())
+        } else {
+            self.window_rows
+                .get(row - self.app_rows.len() - self.plugin_rows.len())
         }
     }
 
-    /// Synchronously apply a query. Returns (generation, is_prefix_mode).
-    fn apply_query(&mut self, query: &str) -> (usize, bool) {
+    /// Synchronously apply a query. Returns (generation, mode).
+    fn apply_query(&mut self, query: &str) -> (usize, QueryMode) {
         self.last_query = query.to_string();
-        if query.starts_with(PLUGIN_PREFIX) {
+        if query.starts_with(WINDOW_PREFIX) {
             self.app_rows.clear();
             self.plugin_rows.clear();
+            let (windows, untitled) = crate::windows::list_windows();
+            let context = SearchContext {
+                apps_only: false,
+                usage: &self.usage,
+                tuning: &self.tuning,
+                now: crate::usage::now_unix(),
+            };
+            let rest = query.strip_prefix(WINDOW_PREFIX).unwrap_or_default();
+            self.window_rows = crate::windows::search(rest.trim(), &windows, &context)
+                .into_iter()
+                .map(Row::Window)
+                .collect();
+            self.windows = windows;
+            self.windows_untitled = untitled;
+            if untitled {
+                // Without titles the list is one row per application, so offer
+                // the permission that unlocks the real thing. It sits last, so
+                // the default selection still starts on a window.
+                self.window_rows.push(Row::WindowPermission);
+            }
             self.search_generation += 1;
-            (self.search_generation, true)
+            (self.search_generation, QueryMode::Windows)
+        } else if query.starts_with(PLUGIN_PREFIX) {
+            self.app_rows.clear();
+            self.plugin_rows.clear();
+            self.window_rows.clear();
+            self.windows.clear();
+            self.windows_untitled = false;
+            self.search_generation += 1;
+            (self.search_generation, QueryMode::Plugins)
         } else {
             self.plugin_rows.clear();
+            self.window_rows.clear();
+            self.windows.clear();
+            self.windows_untitled = false;
             self.search_generation += 1;
             let context = SearchContext {
                 apps_only: self.apps_only,
@@ -125,7 +189,7 @@ impl LauncherDelegate {
                 .into_iter()
                 .map(|(i, _)| Row::App(i))
                 .collect();
-            (self.search_generation, false)
+            (self.search_generation, QueryMode::Apps)
         }
     }
 }
@@ -145,6 +209,10 @@ impl ListDelegate for LauncherDelegate {
     ) -> Option<Self::Item> {
         let text = match self.row_at(ix.row)? {
             Row::App(app_idx) => self.apps[*app_idx].display_name.clone(),
+            Row::Window(window_idx) => self.windows[*window_idx].label(),
+            Row::WindowPermission => {
+                "授予「辅助功能」权限以按窗口切换（当前只能按应用切换）".to_string()
+            }
             Row::Plugin {
                 plugin_label, item, ..
             } => format!("{}:{}", plugin_label, item.title),
@@ -229,12 +297,14 @@ impl LauncherView {
             apps_only,
             usage,
             tuning,
+            window_rows: Vec::new(),
+            windows: Vec::new(),
+            windows_untitled: false,
         };
 
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(true));
 
-        let query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 > 调用插件…"));
+        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder(QUERY_PLACEHOLDER));
 
         let sub_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("输入内容后按 Enter 执行，Esc 返回"));
@@ -335,29 +405,48 @@ impl LauncherView {
         self.launch_error = None;
         let query = self.query_input.read(cx).value().to_string();
 
-        let (generation, prefix_mode) = self.list.update(cx, |state, cx| {
+        let (generation, mode, untitled) = self.list.update(cx, |state, cx| {
             let delegate = state.delegate_mut();
-            let (generation, prefix_mode) = delegate.apply_query(&query);
+            let (generation, mode) = delegate.apply_query(&query);
             let count = delegate.total_count();
+            let untitled = delegate.windows_untitled;
             state.set_selected_index((count > 0).then(|| IndexPath::new(0)), window, cx);
             state.scroll_to_selected_item(window, cx);
             cx.notify();
-            (generation, prefix_mode)
+            (generation, mode, untitled)
         });
 
-        if !prefix_mode {
+        if mode != QueryMode::Plugins {
             // No longer a plugin query: cancel whatever is still pending so it
             // does not execute plugins or overwrite the app results.
             self.plugin_query_generation.fetch_add(1, Ordering::SeqCst);
             self.plugin_query_task = None;
+            // `!` can only match titles while macOS hands them out: say so in
+            // the search field instead of showing an unexplained list.
+            let placeholder = if mode == QueryMode::Windows && untitled {
+                WINDOW_PLACEHOLDER
+            } else {
+                QUERY_PLACEHOLDER
+            };
+            self.query_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
             return;
         }
+
+        self.query_input.update(cx, |input, cx| {
+            input.set_placeholder(QUERY_PLACEHOLDER, window, cx)
+        });
 
         // Prefix routing: debounce, then query all enabled plugins in the
         // background and merge results when they are still current. Every new
         // keystroke supersedes the previous query: its task is dropped here
         // (cancelling it) and its generation token goes stale.
-        let rest = query[PLUGIN_PREFIX.len()..].trim().to_string();
+        let rest = query
+            .strip_prefix(PLUGIN_PREFIX)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let pm = crate::plugin_manager(cx);
         let list = self.list.clone();
         let window_handle = window.window_handle();
@@ -516,6 +605,35 @@ impl LauncherView {
                     }
                 })
                 .detach();
+            }
+            Row::WindowPermission => {
+                // Ask through the accessibility prompt and open the pane, since
+                // macOS only shows the prompt once per application.
+                crate::windows::request_accessibility();
+                std::thread::spawn(|| {
+                    let _ = std::process::Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                        .status();
+                });
+                crate::dismiss_launcher(window, cx);
+            }
+            Row::Window(window_idx) => {
+                let Some(target) = self
+                    .list
+                    .read(cx)
+                    .delegate()
+                    .windows
+                    .get(window_idx)
+                    .cloned()
+                else {
+                    return;
+                };
+                // Accessibility calls can block on a busy application, so they
+                // run on a detached thread; the panel closes right away.
+                std::thread::spawn(move || {
+                    crate::windows::focus(&target);
+                });
+                crate::dismiss_launcher(window, cx);
             }
             Row::Plugin {
                 plugin_name, item, ..
@@ -690,7 +808,10 @@ impl Render for LauncherView {
 mod tests {
     // Imported explicitly rather than via `super::*`: the parent glob-imports
     // gpui, whose `test` attribute would shadow the built-in one here.
-    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row, SearchTuning, open_command};
+    use super::{
+        LauncherDelegate, PLUGIN_PREFIX, PluginItem, QueryMode, Row, SearchTuning, WINDOW_PREFIX,
+        open_command,
+    };
     use crate::apps::AppEntry;
     use std::sync::Arc;
 
@@ -708,7 +829,34 @@ mod tests {
             apps_only: false,
             usage: Arc::new(crate::usage::UsageStore::in_memory()),
             tuning: SearchTuning::default(),
+            window_rows: Vec::new(),
+            windows: Vec::new(),
+            windows_untitled: false,
         }
+    }
+
+    #[test]
+    fn the_window_prefix_lists_open_windows() {
+        let mut delegate = delegate(vec![app("Safari", "/Applications/Safari.app")]);
+        let (_, mode) = delegate.apply_query(WINDOW_PREFIX);
+        assert_eq!(mode, QueryMode::Windows);
+        assert!(delegate.app_rows.is_empty(), "app rows give way to windows");
+        let listed = delegate
+            .window_rows
+            .iter()
+            .filter(|row| matches!(row, Row::Window(_)))
+            .count();
+        assert_eq!(
+            listed,
+            delegate.windows.len(),
+            "an empty window query lists every window it found"
+        );
+
+        // Leaving the mode gives the applications back.
+        let (_, mode) = delegate.apply_query("saf");
+        assert_eq!(mode, QueryMode::Apps);
+        assert!(delegate.window_rows.is_empty());
+        assert!(!delegate.app_rows.is_empty());
     }
 
     #[test]
@@ -746,9 +894,9 @@ mod tests {
             },
         }];
 
-        let (_, prefix_mode) = delegate.apply_query("saf");
+        let (_, mode) = delegate.apply_query("saf");
 
-        assert!(!prefix_mode);
+        assert_eq!(mode, QueryMode::Apps);
         assert_eq!(delegate.app_rows.len(), 1);
         assert!(
             delegate.plugin_rows.is_empty(),
@@ -762,8 +910,8 @@ mod tests {
         let mut delegate = delegate(vec![app("Safari", "/Applications/Safari.app")]);
 
         let first_query = format!("{PLUGIN_PREFIX} he");
-        let (first, prefix_mode) = delegate.apply_query(&first_query);
-        assert!(prefix_mode);
+        let (first, mode) = delegate.apply_query(&first_query);
+        assert_eq!(mode, QueryMode::Plugins);
         assert_eq!(delegate.last_query, first_query);
         assert!(
             delegate.app_rows.is_empty() && delegate.row_at(0).is_none(),

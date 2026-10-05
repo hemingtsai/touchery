@@ -17,6 +17,7 @@ mod ui_settings;
 mod ui_theme;
 mod usage;
 mod watcher;
+mod windows;
 
 use gpui::prelude::*;
 use gpui::*;
@@ -658,7 +659,7 @@ fn hand_back_keyboard(cx: &App) {
 }
 
 /// Make another application the active one.
-fn activate_app(pid: i32) {
+pub(crate) fn activate_app(pid: i32) {
     use objc::class;
     use objc::msg_send;
     use objc::runtime::Object;
