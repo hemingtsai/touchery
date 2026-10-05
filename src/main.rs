@@ -197,6 +197,7 @@ fn main() {
         // Dismiss the launcher as soon as the user looks away from it.
         let blur_flag = panel_blurred.clone();
         observe_panel_blur(panel_blurred);
+        observe_settings_close();
 
         // Bind Escape globally so the launcher window can dismiss itself.
         cx.bind_keys([KeyBinding::new("escape", launcher::LauncherCancel, None)]);
@@ -365,6 +366,9 @@ pub fn open_settings(cx: &mut App) {
         None => (Bounds::new(point(px(0.), px(0.)), settings_size), None),
     };
 
+    // The panel is meant to be an ordinary window: window managers and the
+    // system only treat it as one while the application is a Dock application.
+    set_activation_policy(true);
     let handle = cx
         .open_window(
             WindowOptions {
@@ -403,6 +407,9 @@ pub fn dismiss_settings(window: &mut Window, cx: &mut App) {
         .borrow_mut()
         .take();
     window.remove_window();
+    // Back to being a menu bar app: the Dock icon and the menu bar go away with
+    // the window they belonged to.
+    set_accessory_policy();
 }
 
 /// Whether the given handle is the control panel window.
@@ -658,6 +665,55 @@ fn hand_back_keyboard(cx: &App) {
     activate_app(pid);
 }
 
+/// Put the menu bar policy back when the control panel's window closes.
+///
+/// `dismiss_settings` covers `Esc`, but the red button closes the window through
+/// AppKit without going through it, and an application left in the `Regular`
+/// policy would keep a Dock icon and a menu bar without a window to justify
+/// them. The launcher is the only `NSPanel` here, so "a non-panel window closed"
+/// is exactly the control panel.
+fn observe_settings_close() {
+    use block::ConcreteBlock;
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let block = ConcreteBlock::new(move |notification: *mut Object| unsafe {
+        if notification.is_null() {
+            return;
+        }
+        let window: *mut Object = msg_send![notification, object];
+        if window.is_null() {
+            return;
+        }
+        if msg_send![window, isKindOfClass: &*class!(NSPanel)] {
+            return;
+        }
+        // AppKit only: touching gpui from inside a notification risks
+        // re-entering an update cycle that is already running.
+        set_activation_policy(false);
+    });
+    let block = block.copy();
+
+    let null: *mut Object = std::ptr::null_mut();
+    unsafe {
+        let center: *mut Object = msg_send![class!(NSNotificationCenter), defaultCenter];
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"NSWindowWillCloseNotification".as_ptr()
+        ];
+        let token: *mut Object = msg_send![
+            center,
+            addObserverForName: name
+            object: null
+            queue: null
+            usingBlock: block
+        ];
+        if !token.is_null() {
+            let _: () = msg_send![token, retain];
+        }
+    }
+}
+
 /// Make another application the active one.
 pub(crate) fn activate_app(pid: i32) {
     use objc::class;
@@ -687,6 +743,19 @@ pub(crate) fn activate_app(pid: i32) {
 /// initialized (gpui's platform layer has already run); `setActivationPolicy:`
 /// takes an NSInteger. Both selectors are stable, public macOS API.
 fn set_accessory_policy() {
+    set_activation_policy(false);
+}
+
+/// Switch between the two activation policies.
+///
+/// `Accessory` (the menu bar app this is most of the time) has no Dock icon,
+/// and macOS treats its windows as belonging to a background agent: window
+/// managers such as AeroSpace, Mission Control's window grouping, ⌘` cycling
+/// and `NSRunningApplication.activationPolicy`-based tools all ignore them.
+/// `Regular`, used while the control panel is open, makes that window an
+/// ordinary application window — at the price of a Dock icon and a menu bar for
+/// as long as the panel is up.
+pub(crate) fn set_activation_policy(regular: bool) {
     use objc::class;
     use objc::msg_send;
     use objc::runtime::Object;
@@ -695,8 +764,8 @@ fn set_accessory_policy() {
 
     unsafe {
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-        // NSApplicationActivationPolicyAccessory = 1
-        let _: () = msg_send![app, setActivationPolicy: 1i64];
+        // NSApplicationActivationPolicyRegular = 0, ...Accessory = 1
+        let _: bool = msg_send![app, setActivationPolicy: if regular { 0i64 } else { 1i64 }];
     }
 }
 
