@@ -15,6 +15,21 @@ actions!(launcher, [LauncherCancel]);
 /// Prefix that routes the query to plugins instead of local apps.
 pub const PLUGIN_PREFIX: &str = ">";
 
+/// The command that starts an application bundle.
+///
+/// Plain `open` reuses a running application: macOS activates it and the app
+/// decides what happens. `-n` asks for another instance instead, which is the
+/// closest thing macOS offers to "always open a new window" — apps that refuse
+/// to run twice ignore it.
+fn open_command(path: &str, new_window: bool) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    if new_window {
+        command.arg("-n");
+    }
+    command.arg(path);
+    command
+}
+
 #[derive(Clone)]
 pub enum Row {
     App(usize),
@@ -462,13 +477,15 @@ impl LauncherView {
                 // the window. Waiting for the exit status also reaps the child
                 // (dropping a Child leaves a zombie behind) and tells us
                 // whether the bundle really started.
+                // Read once, before the window goes away, so a change in the
+                // control panel applies to the very next launch.
+                let new_window = crate::config::Config::load().new_window;
                 cx.spawn(async move |launcher, cx| {
                     let open_path = path.clone();
                     let status = cx
                         .background_executor()
                         .spawn(async move {
-                            let result =
-                                std::process::Command::new("open").arg(&open_path).status();
+                            let result = open_command(&open_path, new_window).status();
                             // Habit ranking needs the launches that actually
                             // started, recorded off the UI thread.
                             if result.as_ref().is_ok_and(|status| status.success()) {
@@ -673,7 +690,7 @@ impl Render for LauncherView {
 mod tests {
     // Imported explicitly rather than via `super::*`: the parent glob-imports
     // gpui, whose `test` attribute would shadow the built-in one here.
-    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row, SearchTuning};
+    use super::{LauncherDelegate, PLUGIN_PREFIX, PluginItem, Row, SearchTuning, open_command};
     use crate::apps::AppEntry;
     use std::sync::Arc;
 
@@ -692,6 +709,25 @@ mod tests {
             usage: Arc::new(crate::usage::UsageStore::in_memory()),
             tuning: SearchTuning::default(),
         }
+    }
+
+    #[test]
+    fn the_new_window_switch_only_adds_the_flag() {
+        let plain = open_command("/Applications/Safari.app", false);
+        assert_eq!(plain.get_program(), "open");
+        assert_eq!(
+            plain.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("/Applications/Safari.app")]
+        );
+
+        let fresh = open_command("/Applications/Safari.app", true);
+        assert_eq!(
+            fresh.get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new("-n"),
+                std::ffi::OsStr::new("/Applications/Safari.app")
+            ]
+        );
     }
 
     #[test]

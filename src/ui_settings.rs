@@ -1246,6 +1246,27 @@ impl SettingsView {
                 }),
         );
 
+        let entity = cx.entity();
+        let new_window_row = setting_row(
+            pal,
+            "始终打开新窗口",
+            "启动已运行的应用时用 open -n 开一个新实例（多数应用会因此弹新窗口；拒绝多开的单实例应用会忽略），立即生效",
+            Switch::new("new-window-toggle")
+                .flex_shrink_0()
+                .checked(config.new_window)
+                .on_click(move |checked: &bool, _window, cx| {
+                    let result = crate::config::modify(|config| {
+                        config.new_window = *checked;
+                    });
+                    entity.update(cx, |_, cx| {
+                        if let Err(e) = result {
+                            eprintln!("[settings] failed to save new_window: {e}");
+                        }
+                        cx.notify();
+                    });
+                }),
+        );
+
         let apps_only = config.apps_only;
         let entity = cx.entity();
         let apps_only_row = setting_row(
@@ -1277,6 +1298,7 @@ impl SettingsView {
                 .child(section_title("启动与索引".to_string(), pal))
                 .child(launch_row)
                 .child(apps_only_row)
+                .child(new_window_row)
                 .child(section_title("输入".to_string(), pal))
                 .child(ime_row)
                 .into_any_element(),

@@ -101,6 +101,9 @@ pub struct Config {
     /// Scoring knobs for the launcher search; missing values keep the
     /// defaults, so an older config file stays valid.
     pub search: crate::search::SearchTuning,
+    /// Launch apps with `open -n`, which starts another instance instead of
+    /// reusing the running one — for most apps that means a new window.
+    pub new_window: bool,
     /// Support system input methods (Chinese, Japanese, …) in the launcher.
     ///
     /// The launcher panel never activates the application by itself, and macOS
@@ -123,6 +126,10 @@ impl Default for Config {
             // all, which is a worse surprise than the keyboard being taken for
             // as long as the launcher is open.
             ime: true,
+            // Off by default: reusing the running app is what macOS does, and a
+            // second instance has visible costs (another Dock icon, another copy
+            // of the app's state).
+            new_window: false,
         }
     }
 }
